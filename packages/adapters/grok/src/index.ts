@@ -1,4 +1,4 @@
-import { spawn, ChildProcess } from "node:child_process";
+import { spawn, ChildProcess, execSync } from "node:child_process";
 import { Task, Run } from "@ai-collab/contracts";
 
 export interface ExecutionContext {
@@ -25,10 +25,6 @@ export class GrokAdapter {
     this.grokBinary = grokBinary;
   }
 
-  /**
-   * 启动真实 Grok Build 终端进程执行任务
-   * 任务文本经由 stdin 管道安全传入，禁用 shell 拼接
-   */
   async executeTask(ctx: ExecutionContext): Promise<ExecutionResult> {
     const taskPayload = JSON.stringify({
       taskId: ctx.task.id,
@@ -57,7 +53,7 @@ export class GrokAdapter {
             COLLAB_RUN_ID: ctx.run.id,
           },
           detached: !isWin,
-          shell: false, // 严格禁用 shell
+          shell: false,
           stdio: ["pipe", "pipe", "pipe"],
         });
 
@@ -95,9 +91,19 @@ export class GrokAdapter {
           });
         });
 
-        proc.on("close", (code) => {
+        proc.on("close", (code, signal) => {
           this.currentProcess = null;
-          const exitCode = code ?? 0;
+          if (signal) {
+            ctx.onLog?.(`[GrokAdapter]: 进程被外部信号终止 (${signal})`);
+            resolve({
+              success: false,
+              summary: `Grok 进程被信号终止: ${signal}`,
+              exitCode: -1,
+            });
+            return;
+          }
+
+          const exitCode = code === null ? -1 : code;
           ctx.onLog?.(`[GrokAdapter]: Grok 进程退出，退出码: ${exitCode}`);
           resolve({
             success: exitCode === 0,
@@ -115,23 +121,25 @@ export class GrokAdapter {
     });
   }
 
-  /**
-   * 工业级进程树销毁 (Process Tree Kill)
-   */
   async cancel(): Promise<void> {
     if (!this.currentProcess || !this.currentProcess.pid) return;
     const pid = this.currentProcess.pid;
 
     try {
       if (process.platform === "win32") {
-        spawn("taskkill", ["/pid", pid.toString(), "/T", "/F"]);
+        try {
+          execSync(`taskkill /F /T /PID ${pid}`, { stdio: "ignore" });
+        } catch {
+          try {
+            execSync(`C:\\Windows\\System32\\taskkill.exe /F /T /PID ${pid}`, { stdio: "ignore" });
+          } catch {}
+        }
       } else {
         process.kill(-pid, "SIGTERM");
-        setTimeout(() => {
-          try {
-            process.kill(-pid, "SIGKILL");
-          } catch {}
-        }, 1500);
+        await new Promise((r) => setTimeout(r, 600));
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch {}
       }
     } catch (e) {
       try {

@@ -27,7 +27,7 @@ export class UVCSClient {
    */
   async execCm(args: string[], cwd: string): Promise<{ stdout: string; stderr: string; code: number }> {
     return new Promise((resolve, reject) => {
-      const proc = spawn(this.cmBinary, args, { cwd });
+      const proc = spawn(this.cmBinary, args, { cwd, shell: false });
       let stdout = "";
       let stderr = "";
 
@@ -47,7 +47,6 @@ export class UVCSClient {
       proc.on("close", (code) => {
         const exitCode = code ?? 0;
         if (exitCode !== 0) {
-          // 拦截排他锁冲突
           if (stderr.includes("locked") || stdout.includes("locked")) {
             reject(
               new CollabError(
@@ -58,7 +57,6 @@ export class UVCSClient {
             );
             return;
           }
-          // 拦截分支/版本冲突
           if (stderr.includes("conflict") || stdout.includes("conflict")) {
             reject(
               new CollabError(
@@ -85,21 +83,50 @@ export class UVCSClient {
   }
 
   /**
-   * 真实查询当前 Unity 工作区版本控制状态
+   * 原生 cm status --header 真实格式解析
+   * 输出样例：/main/alice@LanzhouLandmarks/LanzhouLandmarks@example-org@unity (cs:8 - head)
+   * 严格解析，解析失败坚决报错阻断，绝不使用假默认值
    */
   async getStatus(workspaceDir: string): Promise<UVCSStatus> {
-    const res = await this.execCm(["status", "--format={branch};{changeset};{rep}"], workspaceDir);
-    const parts = res.stdout.trim().split(";");
+    const res = await this.execCm(["status", "--header"], workspaceDir);
+    const trimmed = res.stdout.trim();
+    
+    // 正则提取分支、仓库名及变更集: <branch>@<repository> (<changeset> ...)
+    const match = trimmed.match(/^([^@\r\n]+)@([^(]+)\s*\((cs:\d+)/i);
+    if (!match) {
+      throw new CollabError(
+        ErrorCode.INTERNAL_ERROR,
+        `cm status --header 解析失败: 未知输出格式 "${trimmed}"`,
+        500
+      );
+    }
+
     return {
-      branch: parts[0] || "/main",
-      changeset: parts[1] || "cs:0",
-      repository: parts[2] || "unknown",
+      branch: match[1].trim(),
+      repository: match[2].trim(),
+      changeset: match[3].trim(),
       pendingChanges: [],
     };
   }
 
   /**
-   * 真实创建任务隔离分支: br:/main/ai/<taskId>/<agentId>
+   * 创建任务独立工作空间，避免污染人工日常工作区
+   */
+  async createWorkspace(wkName: string, wkPath: string, repoSpec?: string): Promise<void> {
+    const args = ["workspace", "create", wkName, wkPath];
+    if (repoSpec) args.push(repoSpec);
+    await this.execCm(args, process.cwd());
+  }
+
+  /**
+   * 删除任务临时工作空间
+   */
+  async deleteWorkspace(wkName: string): Promise<void> {
+    await this.execCm(["workspace", "delete", wkName], process.cwd());
+  }
+
+  /**
+   * 在 base changeset 上为具体任务创建独立分支: br:/main/ai/<taskId>/<agentId>
    */
   async createBranch(workspaceDir: string, branchName: string, baseChangeset?: string): Promise<string> {
     const args = ["branch", "create", branchName];
@@ -111,25 +138,33 @@ export class UVCSClient {
   }
 
   /**
-   * 真实切换工作区分支
+   * 切换工作区分支
    */
   async switchBranch(workspaceDir: string, branchName: string): Promise<void> {
     await this.execCm(["switch", branchName], workspaceDir);
   }
 
   /**
-   * 真实对特定资源申请排他性文件锁（用于 .unity 场景或 .prefab 资产）
+   * 对排他性资源申请锁定（通过 cm checkout 实现排他检出锁）
    */
   async lockFile(workspaceDir: string, itemPath: string): Promise<boolean> {
-    const res = await this.execCm(["lock", itemPath], workspaceDir);
+    const res = await this.execCm(["checkout", itemPath], workspaceDir);
     return res.code === 0;
   }
 
   /**
-   * 真实获取当前仓库已有文件锁清单
+   * 释放本任务持有的排他锁（通过 cm undocheckout 撤销检出释放锁）
+   */
+  async unlockFile(workspaceDir: string, itemPath: string): Promise<boolean> {
+    const res = await this.execCm(["undocheckout", itemPath], workspaceDir);
+    return res.code === 0;
+  }
+
+  /**
+   * 列出工作区已有文件锁清单
    */
   async listLocks(workspaceDir: string): Promise<UVCSLock[]> {
-    const res = await this.execCm(["listlocks", "--format={id};{path};{owner};{branch}"], workspaceDir);
+    const res = await this.execCm(["lock", "list"], workspaceDir);
     const lines = res.stdout.trim().split("\n");
     const locks: UVCSLock[] = [];
     for (const line of lines) {
@@ -147,7 +182,7 @@ export class UVCSClient {
   }
 
   /**
-   * 真实执行 check-in 提交本任务修改，并严格提取服务端返回的 changeset 编号
+   * 真实执行 checkin 提交，严格从输出提取服务端生成的 changeset 编号
    */
   async checkin(workspaceDir: string, comment: string, paths: string[] = ["."]): Promise<string> {
     const args = ["checkin", ...paths, "-c", comment];

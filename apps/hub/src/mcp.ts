@@ -11,7 +11,7 @@ import { TaskState } from "@ai-collab/contracts";
 
 export function createMcpServerInstance(storage: StorageEngine, scheduler: HubScheduler): Server {
   const server = new Server(
-    { name: "ai-collab-hub-mcp", version: "0.1.0" },
+    { name: "ai-collab-hub-mcp", version: "0.2.0" },
     { capabilities: { tools: {} } }
   );
 
@@ -210,10 +210,60 @@ export function createMcpServerInstance(storage: StorageEngine, scheduler: HubSc
 
 export function setupMcpServer(app: FastifyInstance, storage: StorageEngine, scheduler: HubScheduler): void {
   const sessions = new Map<string, { transport: SSEServerTransport; server: Server }>();
+  const defaultServer = createMcpServerInstance(storage, scheduler);
 
-  // 1. 客户端建立 SSE 管道
+  // 模式 1：标准单端点 HTTP POST JSON-RPC（广泛兼容各类直接发送 HTTP 调用的 MCP 客户端）
+  app.post("/mcp", async (req: FastifyRequest, reply: FastifyReply) => {
+    const body = req.body as any;
+    if (!body || !body.method) {
+      return reply.status(400).send({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "无效的 JSON-RPC 请求" } });
+    }
+
+    if (body.method === "initialize") {
+      return reply.send({
+        jsonrpc: "2.0",
+        id: body.id,
+        result: {
+          protocolVersion: "2024-11-05",
+          capabilities: { tools: {} },
+          serverInfo: { name: "ai-collab-hub-mcp", version: "0.2.0" },
+        },
+      });
+    }
+
+    if (body.method === "tools/list") {
+      const handler = (defaultServer as any)._requestHandlers?.get("tools/list");
+      const result = await handler(body);
+      return reply.send({ jsonrpc: "2.0", id: body.id, result });
+    }
+
+    if (body.method === "tools/call") {
+      const handler = (defaultServer as any)._requestHandlers?.get("tools/call");
+      try {
+        const result = await handler(body);
+        return reply.send({ jsonrpc: "2.0", id: body.id, result });
+      } catch (err) {
+        return reply.send({
+          jsonrpc: "2.0",
+          id: body.id,
+          error: { code: -32000, message: (err as Error).message },
+        });
+      }
+    }
+
+    if (body.method === "ping") {
+      return reply.send({ jsonrpc: "2.0", id: body.id, result: {} });
+    }
+
+    return reply.status(404).send({ jsonrpc: "2.0", id: body.id, error: { code: -32601, message: `不支持的方法: ${body.method}` } });
+  });
+
+  // 模式 2：标准双向 SSE 协议流（针对按 SSE 规范长连接挂起的客户端）
   app.get("/mcp/sse", async (req: FastifyRequest, reply: FastifyReply) => {
+    // 关键：通知 Fastify 劫持原生 Socket 流，禁止框架提前完成响应
+    reply.hijack();
     reply.raw.setHeader("Access-Control-Allow-Origin", "*");
+
     const transport = new SSEServerTransport("/mcp/messages", reply.raw);
     const sessionServer = createMcpServerInstance(storage, scheduler);
 
@@ -227,13 +277,13 @@ export function setupMcpServer(app: FastifyInstance, storage: StorageEngine, sch
     await sessionServer.connect(transport);
   });
 
-  // 2. 客户端在已建立的会话上发送消息
   app.post("/mcp/messages", async (req: FastifyRequest<{ Querystring: { sessionId: string } }>, reply: FastifyReply) => {
     const sessionId = req.query.sessionId;
     const session = sessions.get(sessionId);
     if (!session) {
       return reply.status(404).send({ error: `未找到活跃的 MCP 会话: ${sessionId}` });
     }
+    reply.hijack();
     await session.transport.handlePostMessage(req.raw, reply.raw, req.body);
   });
 }
