@@ -50,6 +50,9 @@ importers:
       '@ai-collab/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@ai-collab/uvcs-workspace':
+        specifier: workspace:*
+        version: link:../../packages/uvcs-workspace
     devDependencies:
       '@types/node':
         specifier: ^20.14.0

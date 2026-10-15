@@ -27,25 +27,33 @@ export class CodexAdapter {
 
   /**
    * 启动真实 Codex 进程执行任务或代码审查
-   * 严格限定在任务绑定的 Unity UVCS workspace 目录中
+   * 工业标准安全规范：
+   * 1. 任务文本通过 stdin 管道传输，杜绝命令行长度超标与命令注入；
+   * 2. shell: false 直接调用二进制，杜绝命令拼接漏洞；
+   * 3. 独立进程组绑定，支持超时/急停时彻底连根销毁整棵进程树。
    */
   async executeTask(ctx: ExecutionContext): Promise<ExecutionResult> {
-    const prompt = [
-      `[Task ID: ${ctx.task.id}]`,
-      `[Title]: ${ctx.task.title}`,
-      `[Goal]: ${ctx.task.goal}`,
-      `[Acceptance Criteria]: ${ctx.task.acceptanceCriteria}`,
-      `请在工作目录 ${ctx.workspaceDir} 下执行审查与代码交付，验证 C# 逻辑与测试规范。`,
-    ].join("\n");
+    const taskPayload = JSON.stringify({
+      taskId: ctx.task.id,
+      title: ctx.task.title,
+      goal: ctx.task.goal,
+      acceptanceCriteria: ctx.task.acceptanceCriteria,
+      workspaceDir: ctx.workspaceDir,
+      assignedAgent: "codex",
+    }, null, 2);
 
-    ctx.onLog?.(`[CodexAdapter]: 正在启动真实 Codex 进程 (${this.codexBinary})...`);
+    ctx.onLog?.(`[CodexAdapter]: 准备通过 stdin 发送任务载荷至 Codex (进程: ${this.codexBinary})...`);
     ctx.onLog?.(`[CodexAdapter]: 隔离工作目录: ${ctx.workspaceDir}`);
 
     return new Promise((resolve) => {
-      // 官方命令: codex run -C <workspaceDir> <prompt>
-      const args = ["run", "-C", ctx.workspaceDir, prompt];
+      // 官方命令: codex exec --path <workspaceDir> -
+      // 允许环境变量自定义命令参数，默认通过 '-' 从标准输入获取任务
+      const args = process.env.CODEX_ARGS 
+        ? process.env.CODEX_ARGS.split(" ")
+        : ["exec", "--path", ctx.workspaceDir, "-"];
 
       try {
+        const isWin = process.platform === "win32";
         const proc = spawn(this.codexBinary, args, {
           cwd: ctx.workspaceDir,
           env: {
@@ -53,11 +61,22 @@ export class CodexAdapter {
             COLLAB_TASK_ID: ctx.task.id,
             COLLAB_RUN_ID: ctx.run.id,
           },
-          detached: process.platform !== "win32",
-          shell: process.platform === "win32",
+          detached: !isWin,
+          shell: false, // 严格禁用 shell 注入
+          stdio: ["pipe", "pipe", "pipe"],
         });
 
         this.currentProcess = proc;
+
+        // 核心要求：通过 stdin 管道安全写入任务文本并关闭输入流
+        if (proc.stdin) {
+          proc.stdin.write(taskPayload, "utf-8", (err) => {
+            if (err) {
+              ctx.onLog?.(`[CodexAdapter]: stdin 写入警告: ${err.message}`);
+            }
+            proc.stdin?.end();
+          });
+        }
 
         proc.stdout?.on("data", (chunk: Buffer) => {
           const lines = chunk.toString().split("\n");
@@ -103,7 +122,7 @@ export class CodexAdapter {
   }
 
   /**
-   * 终止子进程树，防止后台孤儿进程未受控修改 Unity 工程
+   * 工业级进程树销毁 (Process Tree Kill)
    */
   async cancel(): Promise<void> {
     if (!this.currentProcess || !this.currentProcess.pid) return;
@@ -114,6 +133,11 @@ export class CodexAdapter {
         spawn("taskkill", ["/pid", pid.toString(), "/T", "/F"]);
       } else {
         process.kill(-pid, "SIGTERM");
+        setTimeout(() => {
+          try {
+            process.kill(-pid, "SIGKILL");
+          } catch {}
+        }, 1500);
       }
     } catch (e) {
       try {

@@ -27,26 +27,28 @@ export class GrokAdapter {
 
   /**
    * 启动真实 Grok Build 终端进程执行任务
-   * 采用官方 Headless 批处理调用规程，绑定任务独立工作区
+   * 任务文本经由 stdin 管道安全传入，禁用 shell 拼接
    */
   async executeTask(ctx: ExecutionContext): Promise<ExecutionResult> {
-    const prompt = [
-      `[Task ID: ${ctx.task.id}]`,
-      `[Title]: ${ctx.task.title}`,
-      `[Goal]: ${ctx.task.goal}`,
-      `[Acceptance Criteria]: ${ctx.task.acceptanceCriteria}`,
-      `[Workspace]: ${ctx.workspaceDir}`,
-      `请在当前 Unity 工作区中实现该需求，确保 C# 脚本规范，遵循 UVCS 版本控制规则。`,
-    ].join("\n");
+    const taskPayload = JSON.stringify({
+      taskId: ctx.task.id,
+      title: ctx.task.title,
+      goal: ctx.task.goal,
+      acceptanceCriteria: ctx.task.acceptanceCriteria,
+      workspaceDir: ctx.workspaceDir,
+      assignedAgent: "grok",
+    }, null, 2);
 
-    ctx.onLog?.(`[GrokAdapter]: 正在启动真实 Grok 进程 (${this.grokBinary})...`);
-    ctx.onLog?.(`[GrokAdapter]: 工作区路径: ${ctx.workspaceDir}`);
+    ctx.onLog?.(`[GrokAdapter]: 准备通过 stdin 发送任务载荷至 Grok (进程: ${this.grokBinary})...`);
+    ctx.onLog?.(`[GrokAdapter]: 目标工作区: ${ctx.workspaceDir}`);
 
-    return new Promise((resolve, reject) => {
-      // 官方 headless 模式参数
-      const args = ["run", "--headless", "-p", prompt];
+    return new Promise((resolve) => {
+      const args = process.env.GROK_ARGS 
+        ? process.env.GROK_ARGS.split(" ")
+        : ["run", "--headless", "-"];
 
       try {
+        const isWin = process.platform === "win32";
         const proc = spawn(this.grokBinary, args, {
           cwd: ctx.workspaceDir,
           env: {
@@ -54,32 +56,33 @@ export class GrokAdapter {
             COLLAB_TASK_ID: ctx.task.id,
             COLLAB_RUN_ID: ctx.run.id,
           },
-          // 独立进程组，保证可干净杀死整棵子进程树
-          detached: process.platform !== "win32",
-          shell: process.platform === "win32",
+          detached: !isWin,
+          shell: false, // 严格禁用 shell
+          stdio: ["pipe", "pipe", "pipe"],
         });
 
         this.currentProcess = proc;
-        let stdoutAcc = "";
-        let stderrAcc = "";
+
+        if (proc.stdin) {
+          proc.stdin.write(taskPayload, "utf-8", (err) => {
+            if (err) {
+              ctx.onLog?.(`[GrokAdapter]: stdin 写入警告: ${err.message}`);
+            }
+            proc.stdin?.end();
+          });
+        }
 
         proc.stdout?.on("data", (chunk: Buffer) => {
           const lines = chunk.toString().split("\n");
           for (const line of lines) {
             const trimmed = line.trim();
-            if (trimmed) {
-              stdoutAcc += trimmed + "\n";
-              ctx.onLog?.(trimmed);
-            }
+            if (trimmed) ctx.onLog?.(trimmed);
           }
         });
 
         proc.stderr?.on("data", (chunk: Buffer) => {
           const text = chunk.toString().trim();
-          if (text) {
-            stderrAcc += text + "\n";
-            ctx.onLog?.(`[Grok-Err]: ${text}`);
-          }
+          if (text) ctx.onLog?.(`[Grok-Err]: ${text}`);
         });
 
         proc.on("error", (err: Error) => {
@@ -105,7 +108,7 @@ export class GrokAdapter {
       } catch (err) {
         resolve({
           success: false,
-          summary: `无法创建子进程: ${(err as Error).message}`,
+          summary: `无法创建 Grok 进程: ${(err as Error).message}`,
           exitCode: -1,
         });
       }
@@ -113,7 +116,7 @@ export class GrokAdapter {
   }
 
   /**
-   * 安全杀死子进程树（跨平台支持 Windows taskkill / POSIX kill）
+   * 工业级进程树销毁 (Process Tree Kill)
    */
   async cancel(): Promise<void> {
     if (!this.currentProcess || !this.currentProcess.pid) return;
@@ -124,6 +127,11 @@ export class GrokAdapter {
         spawn("taskkill", ["/pid", pid.toString(), "/T", "/F"]);
       } else {
         process.kill(-pid, "SIGTERM");
+        setTimeout(() => {
+          try {
+            process.kill(-pid, "SIGKILL");
+          } catch {}
+        }, 1500);
       }
     } catch (e) {
       try {
