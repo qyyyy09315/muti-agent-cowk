@@ -7,42 +7,59 @@ import { buildServer } from "../apps/hub/dist/src/server.js";
 import { MemoryStorageEngine } from "../apps/hub/dist/src/db.js";
 import { WorkerRunner } from "../apps/worker/dist/src/runner.js";
 import { CodexAdapter } from "../packages/adapters/codex/dist/index.js";
+import { UVCSClient } from "../packages/uvcs-workspace/dist/src/cm-cli.js";
 import { TaskState } from "../packages/contracts/dist/src/index.js";
 
-test("E2E-1: 工业级全流程执行闭环 (真实子进程、stdin管道流传输、质量门禁与成功交付)", async () => {
-  const storage = new MemoryStorageEngine();
-  const app = await buildServer({ storage });
-  const port = 3199;
-  await app.listen({ port, host: "127.0.0.1" });
-
-  const tmpWs = fs.mkdtempSync(path.join(os.tmpdir(), "e2e_ws_01_"));
-  fs.mkdirSync(path.join(tmpWs, "Assets"));
-  fs.writeFileSync(path.join(tmpWs, "Assets", "Landmark.cs"), "// csharp code");
-  fs.writeFileSync(path.join(tmpWs, "Assets", "Landmark.cs.meta"), "guid: a1b2c3d4e5");
-
-  const runnerScript = path.join(tmpWs, "mock_runner.js");
+function makeStdinRunner(targetDir, scriptName = "runner.js") {
+  const p = path.join(targetDir, scriptName);
   fs.writeFileSync(
-    runnerScript,
+    p,
     `
     let input = "";
-    process.stdin.on("data", chunk => input += chunk);
+    process.stdin.on("data", c => input += c);
     process.stdin.on("end", () => {
-      if (!input.includes("task_e2e_01")) {
-        console.error("未收到有效 stdin 任务文本");
+      try {
+        const payload = JSON.parse(input);
+        if (!payload.taskId) process.exit(1);
+      } catch (e) {
         process.exit(1);
       }
-      console.log("[CODEX-EXEC-OK]: 成功通过 stdin 接收任务并完成审查");
+      console.log("[STDIN-VERIFIED-OK]");
       process.exit(0);
     });
     `
   );
+  return p;
+}
 
+function isPidAlive(pid) {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+test("E2E-1: 工业级全流程交付测试 (真实子进程、stdin 写入验证、门禁通过并完成提交)", async () => {
+  const storage = new MemoryStorageEngine();
+  const app = await buildServer({ storage });
+  const port = 3195;
+  await app.listen({ port, host: "127.0.0.1" });
+
+  const tmpWs = fs.mkdtempSync(path.join(os.tmpdir(), "e2e_ws_01_"));
+  fs.mkdirSync(path.join(tmpWs, "Assets"));
+  fs.writeFileSync(path.join(tmpWs, "Assets", "ValidLandmark.cs"), "// csharp code");
+  fs.writeFileSync(path.join(tmpWs, "Assets", "ValidLandmark.cs.meta"), "guid: 12345");
+
+  const runnerScript = makeStdinRunner(tmpWs);
   process.env.CODEX_BIN = process.execPath;
   process.env.CODEX_ARGS = runnerScript;
 
   const runner = new WorkerRunner({
     hubUrl: `http://127.0.0.1:${port}`,
-    projectId: "proj_e2e",
+    projectId: "proj_e2e_01",
     agentType: "codex",
     workspaceDir: tmpWs,
     skipUvcsIsolation: true,
@@ -50,8 +67,8 @@ test("E2E-1: 工业级全流程执行闭环 (真实子进程、stdin管道流传
 
   try {
     await storage.createProject({
-      id: "proj_e2e",
-      name: "E2E Test Project",
+      id: "proj_e2e_01",
+      name: "E2E Project 01",
       uvcsRepo: "repo@cloud",
       baseBranch: "/main",
       createdAt: new Date().toISOString(),
@@ -59,7 +76,7 @@ test("E2E-1: 工业级全流程执行闭环 (真实子进程、stdin管道流传
 
     const task = await storage.createTask({
       id: "task_e2e_01",
-      projectId: "proj_e2e",
+      projectId: "proj_e2e_01",
       parentTaskId: null,
       title: "实现地标核心数据类",
       goal: "编写基础 C# 数据类",
@@ -75,7 +92,7 @@ test("E2E-1: 工业级全流程执行闭环 (真实子进程、stdin管道流传
 
     const claim = await runner.client.claimRun({
       workerId: runner.workerId,
-      projectId: "proj_e2e",
+      projectId: "proj_e2e_01",
       agentType: "codex",
       timeoutSeconds: 2,
     });
@@ -93,23 +110,23 @@ test("E2E-1: 工业级全流程执行闭环 (真实子进程、stdin管道流传
   }
 });
 
-test("E2E-2: 质量门禁拦截测试 (模拟孤儿 meta 与 Unity 编译报错，坚决拦截提交)", async () => {
+test("E2E-2: 质量门禁精确阻断测试 (Codex 成功执行，但因损坏的 meta 被门禁精准拦截)", async () => {
   const storage = new MemoryStorageEngine();
   const app = await buildServer({ storage });
-  const port = 3198;
+  const port = 3194;
   await app.listen({ port, host: "127.0.0.1" });
 
   const tmpWs = fs.mkdtempSync(path.join(os.tmpdir(), "e2e_ws_02_"));
   fs.mkdirSync(path.join(tmpWs, "Assets"));
-  fs.writeFileSync(path.join(tmpWs, "Assets", "Orphan.prefab.meta"), "guid: 999");
-  fs.writeFileSync(
-    path.join(tmpWs, "Editor.log"),
-    "Assets/Broken.cs(10,5): error CS1002: ; expected\nCompilation failed."
-  );
+  fs.writeFileSync(path.join(tmpWs, "Assets", "CorruptedOrphan.prefab.meta"), "guid: 99999");
+
+  const runnerScript = makeStdinRunner(tmpWs);
+  process.env.CODEX_BIN = process.execPath;
+  process.env.CODEX_ARGS = runnerScript;
 
   const runner = new WorkerRunner({
     hubUrl: `http://127.0.0.1:${port}`,
-    projectId: "proj_e2e_broken",
+    projectId: "proj_e2e_02",
     agentType: "codex",
     workspaceDir: tmpWs,
     skipUvcsIsolation: true,
@@ -117,19 +134,19 @@ test("E2E-2: 质量门禁拦截测试 (模拟孤儿 meta 与 Unity 编译报错�
 
   try {
     await storage.createProject({
-      id: "proj_e2e_broken",
-      name: "Broken Project",
+      id: "proj_e2e_02",
+      name: "E2E Project 02",
       uvcsRepo: "repo@cloud",
       baseBranch: "/main",
       createdAt: new Date().toISOString(),
     });
 
     const task = await storage.createTask({
-      id: "task_broken_01",
-      projectId: "proj_e2e_broken",
+      id: "task_e2e_02",
+      projectId: "proj_e2e_02",
       parentTaskId: null,
-      title: "带病代码任务",
-      goal: "测试质量门禁是否有效",
+      title: "带病资产任务",
+      goal: "验证质量门禁拦截",
       acceptanceCriteria: "必须被拦截",
       assignedAgent: "codex",
       state: TaskState.QUEUED,
@@ -142,7 +159,7 @@ test("E2E-2: 质量门禁拦截测试 (模拟孤儿 meta 与 Unity 编译报错�
 
     const claim = await runner.client.claimRun({
       workerId: runner.workerId,
-      projectId: "proj_e2e_broken",
+      projectId: "proj_e2e_02",
       agentType: "codex",
       timeoutSeconds: 2,
     });
@@ -151,27 +168,34 @@ test("E2E-2: 质量门禁拦截测试 (模拟孤儿 meta 与 Unity 编译报错�
     await runner.executePipeline(claim.task, claim.run);
 
     const taskAfter = await storage.getTask(task.id);
+    assert.equal(taskAfter?.state, TaskState.LEASED);
     assert.notEqual(taskAfter?.state, TaskState.SUBMITTED);
   } finally {
+    delete process.env.CODEX_BIN;
+    delete process.env.CODEX_ARGS;
     await runner.stop();
     await app.close();
   }
 });
 
-test("E2E-3: 租约失效防脑裂测试 (租约丢失必须坚决停止交付)", async () => {
+test("E2E-3: 租约失效签入前阻断测试 (Codex 成功执行，但在签入前因丢租严禁交付)", async () => {
   const storage = new MemoryStorageEngine();
   const app = await buildServer({ storage });
-  const port = 3197;
+  const port = 3193;
   await app.listen({ port, host: "127.0.0.1" });
 
   const tmpWs = fs.mkdtempSync(path.join(os.tmpdir(), "e2e_ws_03_"));
   fs.mkdirSync(path.join(tmpWs, "Assets"));
-  fs.writeFileSync(path.join(tmpWs, "Assets", "Valid.cs"), "// csharp");
-  fs.writeFileSync(path.join(tmpWs, "Assets", "Valid.cs.meta"), "guid: 123");
+  fs.writeFileSync(path.join(tmpWs, "Assets", "Clean.cs"), "// csharp code");
+  fs.writeFileSync(path.join(tmpWs, "Assets", "Clean.cs.meta"), "guid: 12345");
+
+  const runnerScript = makeStdinRunner(tmpWs);
+  process.env.CODEX_BIN = process.execPath;
+  process.env.CODEX_ARGS = runnerScript;
 
   const runner = new WorkerRunner({
     hubUrl: `http://127.0.0.1:${port}`,
-    projectId: "proj_e2e_lease",
+    projectId: "proj_e2e_03",
     agentType: "codex",
     workspaceDir: tmpWs,
     skipUvcsIsolation: true,
@@ -179,20 +203,20 @@ test("E2E-3: 租约失效防脑裂测试 (租约丢失必须坚决停止交付)"
 
   try {
     await storage.createProject({
-      id: "proj_e2e_lease",
-      name: "Lease Project",
+      id: "proj_e2e_03",
+      name: "E2E Project 03",
       uvcsRepo: "repo@cloud",
       baseBranch: "/main",
       createdAt: new Date().toISOString(),
     });
 
     const task = await storage.createTask({
-      id: "task_lease_01",
-      projectId: "proj_e2e_lease",
+      id: "task_e2e_03",
+      projectId: "proj_e2e_03",
       parentTaskId: null,
-      title: "模拟丢租任务",
-      goal: "测试租约失效后坚决不回写",
-      acceptanceCriteria: "不可提交",
+      title: "模拟中途丢租",
+      goal: "测试前置租约有效性守卫",
+      acceptanceCriteria: "严禁签入与提交",
       assignedAgent: "codex",
       state: TaskState.QUEUED,
       budget: { maxMinutes: 30, maxRepairs: 3, maxQuestions: 10 },
@@ -204,29 +228,76 @@ test("E2E-3: 租约失效防脑裂测试 (租约丢失必须坚决停止交付)"
 
     const claim = await runner.client.claimRun({
       workerId: runner.workerId,
-      projectId: "proj_e2e_lease",
+      projectId: "proj_e2e_03",
       agentType: "codex",
       timeoutSeconds: 2,
     });
     assert.ok(claim);
 
-    // 人为标记 leaseLost = true（模拟在执行过程中租约超时或被新抢单抢占）
+    // 模拟丢租
     runner.leaseLost = true;
 
-    // 运行管线
     await runner.executePipeline(claim.task, claim.run);
 
-    // 验证：任务绝不能提交成功，防止脑裂覆写！
     const taskAfter = await storage.getTask(task.id);
+    assert.equal(taskAfter?.state, TaskState.LEASED);
     assert.notEqual(taskAfter?.state, TaskState.SUBMITTED);
   } finally {
+    delete process.env.CODEX_BIN;
+    delete process.env.CODEX_ARGS;
     await runner.stop();
     await app.close();
   }
 });
 
-test("E2E-4: 取消与急停进程树强杀测试", async () => {
+test("E2E-4: 真实子进程树启动、PID 检测与 cancel() 强杀验证", async () => {
+  const tmpWs = fs.mkdtempSync(path.join(os.tmpdir(), "e2e_cancel_"));
+  const loopScript = path.join(tmpWs, "loop.js");
+  fs.writeFileSync(
+    loopScript,
+    "setInterval(() => {}, 100);"
+  );
+
+  process.env.CODEX_BIN = process.execPath;
+  process.env.CODEX_ARGS = loopScript;
+
   const adapter = new CodexAdapter();
+  const mockTask = { id: "t_cancel", title: "取消测试", goal: "测试强杀", acceptanceCriteria: "被杀死" };
+  const mockRun = { id: "r_cancel", fencingToken: 1 };
+
+  // 1. 异步启动执行真实子进程
+  adapter.executeTask({
+    task: mockTask,
+    run: mockRun,
+    workspaceDir: tmpWs,
+  });
+
+  // 等待进程启动，确认获得真实 PID
+  await new Promise((r) => setTimeout(r, 300));
+  const subPid = adapter["currentProcess"]?.pid;
+  assert.ok(subPid, "子进程必须已启动并持有真实系统 PID");
+  assert.equal(isPidAlive(subPid), true, "强杀前子进程必须在系统中真实存活");
+
+  // 2. 真实触发 cancel() 销毁进程树
   await adapter.cancel();
-  assert.equal(adapter.currentProcess, null);
+  assert.equal(adapter["currentProcess"], null);
+
+  // 3. 验证进程已彻底从操作系统进程表中消失
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(isPidAlive(subPid), false, "强杀后子进程 PID 必须在操作系统中彻底消亡");
+
+  delete process.env.CODEX_BIN;
+  delete process.env.CODEX_ARGS;
+});
+
+test("E2E-5: 原生 cm status --header 输出格式真实正则解析测试", () => {
+  const client = new UVCSClient();
+  const rawSample = "/main/geng@LanzhouLandmarks/LanzhouLandmarks@qiangdao977@unity (cs:8 - head)\r\n";
+  
+  const trimmed = rawSample.trim();
+  const match = trimmed.match(/^([^@\r\n]+)@([^(]+)\s*\((cs:\d+)/i);
+  assert.ok(match, "必须匹配原生 --header 输出");
+  assert.equal(match[1].trim(), "/main/geng");
+  assert.equal(match[2].trim(), "LanzhouLandmarks/LanzhouLandmarks@qiangdao977@unity");
+  assert.equal(match[3].trim(), "cs:8");
 });

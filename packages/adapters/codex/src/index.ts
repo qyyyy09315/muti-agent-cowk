@@ -1,4 +1,4 @@
-import { spawn, ChildProcess } from "node:child_process";
+import { spawn, ChildProcess, execSync } from "node:child_process";
 import { Task, Run } from "@ai-collab/contracts";
 
 export interface ExecutionContext {
@@ -27,10 +27,11 @@ export class CodexAdapter {
 
   /**
    * 启动真实 Codex 进程执行任务或代码审查
-   * 工业标准安全规范：
-   * 1. 任务文本通过 stdin 管道传输，杜绝命令行长度超标与命令注入；
-   * 2. shell: false 直接调用二进制，杜绝命令拼接漏洞；
-   * 3. 独立进程组绑定，支持超时/急停时彻底连根销毁整棵进程树。
+   * 修复规范：
+   * 1. 严格使用官方 -C <dir> - 参数，任务上下文通过 stdin 管道写入；
+   * 2. shell: false 直接调用二进制；
+   * 3. 严格处理信号退出（signal 不为空或 exitCode 不为 0 均判失败）；
+   * 4. 支持进程树销毁。
    */
   async executeTask(ctx: ExecutionContext): Promise<ExecutionResult> {
     const taskPayload = JSON.stringify({
@@ -46,11 +47,11 @@ export class CodexAdapter {
     ctx.onLog?.(`[CodexAdapter]: 隔离工作目录: ${ctx.workspaceDir}`);
 
     return new Promise((resolve) => {
-      // 官方命令: codex exec --path <workspaceDir> -
-      // 允许环境变量自定义命令参数，默认通过 '-' 从标准输入获取任务
+      // 官方命令签名: codex exec -C <workspaceDir> -
+      // 默认通过 '-' 从标准输入获取任务指令，严禁使用已被弃用的 --path
       const args = process.env.CODEX_ARGS 
         ? process.env.CODEX_ARGS.split(" ")
-        : ["exec", "--path", ctx.workspaceDir, "-"];
+        : ["exec", "-C", ctx.workspaceDir, "-"];
 
       try {
         const isWin = process.platform === "win32";
@@ -62,13 +63,13 @@ export class CodexAdapter {
             COLLAB_RUN_ID: ctx.run.id,
           },
           detached: !isWin,
-          shell: false, // 严格禁用 shell 注入
+          shell: false,
           stdio: ["pipe", "pipe", "pipe"],
         });
 
         this.currentProcess = proc;
 
-        // 核心要求：通过 stdin 管道安全写入任务文本并关闭输入流
+        // 通过 stdin 管道写入任务文本并关闭输入流
         if (proc.stdin) {
           proc.stdin.write(taskPayload, "utf-8", (err) => {
             if (err) {
@@ -101,9 +102,20 @@ export class CodexAdapter {
           });
         });
 
-        proc.on("close", (code) => {
+        // 关键修复：显式判断 signal 信号退出，禁止将 null 误当成功
+        proc.on("close", (code, signal) => {
           this.currentProcess = null;
-          const exitCode = code ?? 0;
+          if (signal) {
+            ctx.onLog?.(`[CodexAdapter]: 进程被外部信号终止 (${signal})`);
+            resolve({
+              success: false,
+              summary: `Codex 进程被信号终止: ${signal}`,
+              exitCode: -1,
+            });
+            return;
+          }
+
+          const exitCode = code === null ? -1 : code;
           ctx.onLog?.(`[CodexAdapter]: Codex 进程退出，退出码: ${exitCode}`);
           resolve({
             success: exitCode === 0,
@@ -122,7 +134,7 @@ export class CodexAdapter {
   }
 
   /**
-   * 工业级进程树销毁 (Process Tree Kill)
+   * 工业级进程树销毁：异步等待 taskkill 完全终止并校验
    */
   async cancel(): Promise<void> {
     if (!this.currentProcess || !this.currentProcess.pid) return;
@@ -130,14 +142,19 @@ export class CodexAdapter {
 
     try {
       if (process.platform === "win32") {
-        spawn("taskkill", ["/pid", pid.toString(), "/T", "/F"]);
+        try {
+          execSync(`taskkill /F /T /PID ${pid}`, { stdio: "ignore" });
+        } catch {
+          try {
+            execSync(`C:\\Windows\\System32\\taskkill.exe /F /T /PID ${pid}`, { stdio: "ignore" });
+          } catch {}
+        }
       } else {
         process.kill(-pid, "SIGTERM");
-        setTimeout(() => {
-          try {
-            process.kill(-pid, "SIGKILL");
-          } catch {}
-        }, 1500);
+        await new Promise((r) => setTimeout(r, 600));
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch {}
       }
     } catch (e) {
       try {

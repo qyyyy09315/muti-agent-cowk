@@ -5,6 +5,7 @@ import { HubClient } from "./client.js";
 import { GrokAdapter } from "@ai-collab/adapter-grok";
 import { CodexAdapter } from "@ai-collab/adapter-codex";
 import { UVCSClient, UnityBridge } from "@ai-collab/uvcs-workspace";
+import { CollabError, ErrorCode } from "@ai-collab/contracts";
 
 export interface WorkerConfig {
   hubUrl: string;
@@ -14,7 +15,7 @@ export interface WorkerConfig {
   workspaceDir: string;
   token?: string;
   cmBinary?: string;
-  skipUvcsIsolation?: boolean; // 仅用于离线轻量单元测试
+  skipUvcsIsolation?: boolean;
 }
 
 export class WorkerRunner {
@@ -22,9 +23,9 @@ export class WorkerRunner {
   readonly workerId: string;
   readonly client: HubClient;
   readonly uvcs: UVCSClient;
+  public leaseLost = false;
   private running = false;
   private currentRunId: string | null = null;
-  private leaseLost = false;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private leaseRenewTimer: NodeJS.Timeout | null = null;
   private adapter: GrokAdapter | CodexAdapter;
@@ -39,16 +40,15 @@ export class WorkerRunner {
 
   async start(): Promise<void> {
     this.running = true;
-    console.log(`[Worker-${this.config.agentType}]: 正在启动工业级守护进程 (Worker ID: ${this.workerId})...`);
+    console.log(`[Worker-${this.config.agentType}]: 正在启动常驻守护进程 (Worker ID: ${this.workerId})...`);
 
-    // 1. 注册能力与心跳
     await this.client.registerWorker({
       id: this.workerId,
       agentType: this.config.agentType,
       name: `${this.config.agentType.toUpperCase()} Worker @ ${os.hostname()}`,
       hostname: os.hostname(),
       capabilities: [this.config.agentType, "unity", "csharp", "uvcs", "quality_gate"],
-      version: "0.2.0",
+      version: "0.2.1",
     });
 
     this.heartbeatTimer = setInterval(async () => {
@@ -62,7 +62,6 @@ export class WorkerRunner {
       }
     }, 15000);
 
-    // 2. 有界长轮询接单循环
     let backoffMs = 2000;
     while (this.running) {
       try {
@@ -85,8 +84,15 @@ export class WorkerRunner {
           console.log(`[Worker-${this.config.agentType}]: 租约 Fencing Token: ${run.fencingToken}`);
           console.log(`======================================================`);
 
-          // 核心闭环执行管线
-          await this.executePipeline(task, run);
+          // 核心修复：接单成功即刻启动续租监控，在后续所有写操作与签入前严密核验
+          this.startLeaseRenewal(run.id, run.fencingToken);
+
+          try {
+            await this.executePipeline(task, run);
+          } finally {
+            this.stopLeaseRenewal();
+            this.currentRunId = null;
+          }
         }
       } catch (pollErr) {
         console.warn(`[Worker-${this.config.agentType}]: 轮询异常，${backoffMs / 1000}s 后重试...`, (pollErr as Error).message);
@@ -97,49 +103,78 @@ export class WorkerRunner {
   }
 
   /**
-   * 工业级严密执行管线：
-   * 分支隔离 -> 资源锁判定 -> 租约守护 -> 模型执行 -> 质量门禁 -> cm签入 -> 防脑裂复核 -> 提交成果
+   * 前置租约守卫：每个变更和签入前强制复核有效租约
+   */
+  private assertLeaseActive(): void {
+    if (this.leaseLost) {
+      throw new CollabError(
+        ErrorCode.LEASE_EXPIRED,
+        "任务租约已失效或已被抢占，阻断后续写操作与云端签入，防止脑裂覆写！",
+        403
+      );
+    }
+  }
+
+  /**
+   * 工业级严密执行管线
    */
   async executePipeline(task: any, run: any): Promise<void> {
-    const wsDir = this.config.workspaceDir;
+    const pipelineStartTime = Date.now();
+    let wsDir = this.config.workspaceDir;
     const branchName = `br:/main/ai/${task.id}/${this.config.agentType}`;
-    let lockedPaths: string[] = [];
-
-    // [Step 1] UVCS 任务隔离分支创建与切换
-    if (!this.config.skipUvcsIsolation) {
-      try {
-        console.log(`[Pipeline 1/7]: 创建并切换至任务隔离分支: ${branchName}...`);
-        await this.uvcs.createBranch(wsDir, branchName);
-        await this.uvcs.switchBranch(wsDir, branchName);
-        console.log(`[Pipeline 1/7]: 分支隔离切换成功`);
-      } catch (err) {
-        console.error(`[Pipeline 终止]: 无法创建或切换 UVCS 分支，任务中止:`, (err as Error).message);
-        return;
-      }
-    }
-
-    // [Step 2] 确认不可合并文件（场景/Prefab/二进制）并申请排他锁
-    if (!this.config.skipUvcsIsolation) {
-      try {
-        console.log(`[Pipeline 2/7]: 扫描排他性资源锁定需求...`);
-        // 自动识别任务中是否指明了特定场景或资源
-        if (task.goal.includes(".unity") || task.title.includes("场景")) {
-          const targetScene = "Assets/Scenes/Main.unity";
-          console.log(`[Pipeline 2/7]: 申请锁定排他场景资源: ${targetScene}`);
-          await this.uvcs.lockFile(wsDir, targetScene);
-          lockedPaths.push(targetScene);
-        }
-      } catch (err) {
-        console.error(`[Pipeline 终止]: 资源锁冲突，已有其他人员/Agent持有排他锁，停止执行:`, (err as Error).message);
-        return;
-      }
-    }
-
-    // [Step 3] 启动自动续租与防脑裂监控
-    this.startLeaseRenewal(run.id, run.fencingToken);
+    const lockedPaths: string[] = [];
 
     try {
-      // [Step 4] 调用适配器（通过 stdin 管道灌入 prompt）
+      this.assertLeaseActive();
+
+      // [Step 1] 分支与工作区隔离处理（杜绝直接改写人工日常工作区）
+      if (!this.config.skipUvcsIsolation) {
+        console.log(`[Pipeline 1/7]: 查询基线状态并准备任务分支: ${branchName}...`);
+        const baseStatus = await this.uvcs.getStatus(wsDir);
+        await this.uvcs.createBranch(wsDir, branchName, baseStatus.changeset);
+        await this.uvcs.switchBranch(wsDir, branchName);
+        console.log(`[Pipeline 1/7]: 分支隔离切换成功 (基准变更集: ${baseStatus.changeset})`);
+      }
+
+      this.assertLeaseActive();
+
+      // [Step 2] 动态扫描不可合并排他资产并申请锁定
+      if (!this.config.skipUvcsIsolation) {
+        console.log(`[Pipeline 2/7]: 扫描排他性资源锁定需求...`);
+        const lockExtensions = [".unity", ".prefab", ".asset", ".mat", ".fbx", ".png"];
+        
+        // 扫描 Assets 目录下匹配扩展名的资源
+        const assetsDir = path.join(wsDir, "Assets");
+        if (fs.existsSync(assetsDir)) {
+          const scanLocks = (d: string) => {
+            const items = fs.readdirSync(d, { withFileTypes: true });
+            for (const it of items) {
+              const fp = path.join(d, it.name);
+              if (it.isDirectory()) {
+                scanLocks(fp);
+              } else {
+                const ext = path.extname(it.name).toLowerCase();
+                // 如果文件名或路径出现在任务目标/标题中，进行精准锁定
+                if (lockExtensions.includes(ext) && (task.goal.includes(it.name) || task.title.includes(it.name))) {
+                  const rel = path.relative(wsDir, fp).replace(/\\/g, "/");
+                  lockedPaths.push(rel);
+                }
+              }
+            }
+          };
+          scanLocks(assetsDir);
+        }
+
+        // 统一申请锁定，冲突即止
+        for (const lp of lockedPaths) {
+          console.log(`[Pipeline 2/7]: 申请锁定排他资源: ${lp}`);
+          await this.uvcs.lockFile(wsDir, lp);
+        }
+      }
+
+      this.assertLeaseActive();
+
+      // [Step 4] 调用模型适配器（通过 stdin 管道流式传输）
       console.log(`[Pipeline 4/7]: 启动模型适配器执行任务 (stdin 管道流传输)...`);
       const execResult = await this.adapter.executeTask({
         task,
@@ -152,8 +187,10 @@ export class WorkerRunner {
         throw new Error(`AI 执行未达成目标或进程异常退出 (Code ${execResult.exitCode})`);
       }
 
-      // [Step 5] 质量门禁：Unity 编译零错误与 .meta GUID 完整性校验
-      console.log(`[Pipeline 5/7]: 执行 Unity 质量门禁检测 (.meta GUID 完整性与编译校验)...`);
+      this.assertLeaseActive();
+
+      // [Step 5] 质量门禁：Unity 编译零错误与新鲜编译日志判定
+      console.log(`[Pipeline 5/7]: 执行 Unity 质量门禁检测 (.meta GUID 完整性与新鲜编译日志)...`);
       const metaAudit = UnityBridge.auditMetaFiles(wsDir);
       if (!metaAudit.valid) {
         throw new Error(
@@ -161,31 +198,35 @@ export class WorkerRunner {
         );
       }
 
-      // 检查 Editor 日志是否存在编译报错
       const editorLogPath = path.join(wsDir, "Editor.log");
       if (fs.existsSync(editorLogPath)) {
+        const stat = fs.statSync(editorLogPath);
+        // 关键修复：编译日志必须是本次运行之后产生的“新鲜日志”，过期日志视为无效
+        if (stat.mtimeMs < pipelineStartTime) {
+          throw new Error(`质量门禁拦截: 未检测到本次执行产生的新鲜 Editor.log (日志修改时间早于流水线启动时间)，拒绝放行！`);
+        }
         const logContent = fs.readFileSync(editorLogPath, "utf-8");
         const compileErrors = UnityBridge.parseCompileErrors(logContent);
         if (compileErrors.length > 0) {
           throw new Error(`质量门禁拦截: Unity 编译存在 ${compileErrors.length} 处错误: ${compileErrors[0]}`);
         }
       }
-      console.log(`[Pipeline 5/7]: 质量门禁检查全部通过 (0 编译错误，0 meta 丢失)`);
+      console.log(`[Pipeline 5/7]: 质量门禁检查全部通过 (0 编译错误，0 meta 丢失，新鲜日志校验有效)`);
 
-      // [Step 6] 真实 cm check-in 签入与变更集 (Changeset) 服务端核对
+      // 关键防脑裂修复：在执行 cm checkin 签入云端前做最终租约复核！
+      this.assertLeaseActive();
+
+      // [Step 6] 真实 cm check-in 签入与变更集验证
       let changeset = `cs:local_${Date.now()}`;
       if (!this.config.skipUvcsIsolation) {
-        console.log(`[Pipeline 6/7]: 执行真实 cm 签入与变更集验证...`);
+        console.log(`[Pipeline 6/7]: 租约在签入前有效，执行真实 cm 签入与变更集核对...`);
         changeset = await this.uvcs.checkin(wsDir, `[AI-Collab] ${task.title}`);
         const statusAfter = await this.uvcs.getStatus(wsDir);
         console.log(`[Pipeline 6/7]: 成功签入 changeset: ${changeset} (当前分支: ${statusAfter.branch})`);
       }
 
-      // [Step 7] 最终租约复核与成果提交（租约丢失必须坚决停止交付）
-      if (this.leaseLost) {
-        console.error(`[Pipeline 严重阻断]: 任务期间租约已丢失或已被其他 Worker 抢占，坚决停止交付成果，防止脑裂覆写！`);
-        return;
-      }
+      // [Step 7] 向 Hub 提交最终成果
+      this.assertLeaseActive();
 
       console.log(`[Pipeline 7/7]: 租约验证有效 (Fencing: ${run.fencingToken})，正在提交成果至 Hub...`);
       await this.client.submitRun({
@@ -200,8 +241,18 @@ export class WorkerRunner {
     } catch (pipelineErr) {
       console.error(`[Pipeline 失败]: 流程中断:`, (pipelineErr as Error).message);
     } finally {
-      this.stopLeaseRenewal();
-      this.currentRunId = null;
+      // 核心修复：无论成功、中断还是异常，在 finally 块中完整释放本任务持有的全部文件锁
+      if (!this.config.skipUvcsIsolation && lockedPaths.length > 0) {
+        console.log(`[Pipeline 清理]: 正在释放本任务申请持有的 ${lockedPaths.length} 个排他资源锁...`);
+        for (const lp of lockedPaths) {
+          try {
+            await this.uvcs.unlockFile(wsDir, lp);
+            console.log(`[Pipeline 清理]: 锁已释放: ${lp}`);
+          } catch (unlockErr) {
+            console.warn(`[Pipeline 清理]: 释放锁异常 (${lp}):`, (unlockErr as Error).message);
+          }
+        }
+      }
     }
   }
 
@@ -218,7 +269,6 @@ export class WorkerRunner {
       } catch (err) {
         console.error(`[Worker-${this.config.agentType}]: 租约续订失败，标记租约丢失并立即终止子进程:`, (err as Error).message);
         this.leaseLost = true;
-        // 租约丢失立即终止 AI 进程，防止脑裂
         await this.adapter.cancel();
         this.stopLeaseRenewal();
       }
