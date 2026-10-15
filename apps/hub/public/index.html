@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Collab 协同控制台 · 稽颠</title>
+  <style>
+    :root {
+      --paper: #eef3f6;
+      --ink: #243044;
+      --muted: #5d6b7c;
+      --line: rgba(36, 48, 68, 0.12);
+      --panel: rgba(255, 255, 255, 0.75);
+      --accent: #3f6f8f;
+      --danger: #b93838;
+      --success: #2e7d58;
+      --warning: #bd7318;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif; }
+    body {
+      background: linear-gradient(160deg, #eaf1f6 0%, #e8eef6 42%, #e7f1ee 100%);
+      color: var(--ink); min-height: 100vh; padding-bottom: 40px;
+    }
+    .header {
+      position: sticky; top: 0; z-index: 50;
+      backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+      background: rgba(255, 255, 255, 0.8);
+      border-bottom: 1px solid var(--line);
+      padding: 14px 28px;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .brand { font-size: 1.1rem; font-weight: 700; letter-spacing: -0.02em; display: flex; align-items: center; gap: 10px; }
+    .badge-proj { font-size: 0.75rem; background: var(--line); color: var(--muted); padding: 3px 8px; border-radius: 99px; }
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+      padding: 8px 16px; font-size: 0.85rem; font-weight: 600; border-radius: 6px;
+      cursor: pointer; border: 1px solid transparent; transition: all 140ms ease;
+    }
+    .btn-solid { background: var(--ink); color: #fff; }
+    .btn-solid:hover { background: var(--accent); }
+    .btn-ghost { background: #fff; border-color: var(--line); color: var(--ink); }
+    .btn-ghost:hover { background: var(--paper); }
+    .btn-danger { background: var(--danger); color: #fff; }
+    .btn-danger:hover { opacity: 0.9; }
+    .btn-success { background: var(--success); color: #fff; }
+    .btn-sm { padding: 4px 10px; font-size: 0.78rem; }
+
+    .container { max-width: 1280px; margin: 24px auto; padding: 0 24px; }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 24px; }
+
+    .card {
+      background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+      padding: 20px; backdrop-filter: blur(8px); box-shadow: 0 4px 20px rgba(36,48,68,0.04);
+    }
+    .card-title { font-size: 0.95rem; font-weight: 700; margin-bottom: 14px; display: flex; justify-content: space-between; align-items: center; }
+    
+    .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+    .dot-online { background: var(--success); box-shadow: 0 0 6px rgba(46,125,88,0.5); }
+    .dot-offline { background: var(--muted); }
+
+    .pill { font-size: 0.72rem; padding: 2px 7px; border-radius: 4px; font-weight: 600; text-transform: uppercase; }
+    .pill-queued { background: #e2e8f0; color: #475569; }
+    .pill-running, .pill-leased { background: #dbeafe; color: #1e40af; }
+    .pill-submitted, .pill-reviewing { background: #fef3c7; color: #92400e; }
+    .pill-completed { background: #dcfce7; color: #166534; }
+    .pill-failed, .pill-cancelled { background: #fee2e2; color: #991b1b; }
+    .pill-paused, .pill-waiting_human { background: #ffedd5; color: #9a3412; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    th { text-align: left; padding: 10px 12px; color: var(--muted); border-bottom: 1px solid var(--line); font-weight: 600; }
+    td { padding: 12px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+    tr:last-child td { border-bottom: none; }
+
+    .approval-alert {
+      background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px;
+      padding: 16px; margin-bottom: 24px; display: flex; justify-content: space-between; align-items: center;
+    }
+    .approval-text { font-size: 0.88rem; color: #92400e; line-height: 1.5; }
+
+    .log-box {
+      background: #1e293b; color: #cbd5e1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.78rem; padding: 14px; border-radius: 8px; height: 260px; overflow-y: auto; line-height: 1.6;
+    }
+    .log-row { margin-bottom: 4px; word-break: break-all; }
+    .log-time { color: #64748b; margin-right: 8px; }
+    .log-ev { color: #38bdf8; font-weight: 600; margin-right: 8px; }
+
+    .modal-overlay {
+      display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 100;
+      align-items: center; justify-content: center; backdrop-filter: blur(4px);
+    }
+    .modal { background: #fff; width: 440px; border-radius: 10px; padding: 24px; box-shadow: 0 20px 40px rgba(0,0,0,0.15); }
+    .form-group { margin-bottom: 14px; }
+    .form-label { display: block; font-size: 0.8rem; font-weight: 600; color: var(--muted); margin-bottom: 6px; }
+    .form-input, .form-select, .form-textarea {
+      width: 100%; padding: 8px 12px; border: 1px solid var(--line); border-radius: 6px;
+      font-size: 0.85rem; color: var(--ink); outline: none;
+    }
+    .form-textarea { resize: vertical; min-height: 80px; }
+
+    /* 登录卡片覆盖层（无公开注册） */
+    #login-overlay {
+      position: fixed; inset: 0; z-index: 200; background: var(--paper);
+      display: flex; align-items: center; justify-content: center;
+    }
+    .login-card {
+      background: #fff; width: 380px; padding: 32px; border-radius: 12px;
+      border: 1px solid var(--line); box-shadow: 0 16px 40px rgba(36,48,68,0.08);
+    }
+  </style>
+</head>
+<body>
+
+  <!-- 登录覆盖层：系统内无注册入口，仅供管理员登录 -->
+  <div id="login-overlay">
+    <div class="login-card">
+      <h2 style="font-size: 1.25rem; font-weight: 700; margin-bottom: 6px;">稽颠 AI 协同控制台</h2>
+      <p style="font-size: 0.82rem; color: var(--muted); margin-bottom: 22px;">请输入系统分配的管理账号与凭据</p>
+      <form onsubmit="handleLogin(event)">
+        <div class="form-group">
+          <label class="form-label">管理员账号</label>
+          <input class="form-input" id="login-user" required autocomplete="username" placeholder="请输入用户名" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">安全口令</label>
+          <input class="form-input" id="login-pwd" type="password" required autocomplete="current-password" placeholder="请输入口令" />
+        </div>
+        <p id="login-err" style="color: var(--danger); font-size: 0.8rem; margin-bottom: 12px; display: none;"></p>
+        <button class="btn btn-solid" style="width: 100%; margin-top: 6px;" type="submit">登 录</button>
+      </form>
+    </div>
+  </div>
+
+  <header class="header">
+    <div class="brand">
+      <span>稽颠 AI 协作中控台</span>
+      <span class="badge-proj" id="current-project-badge">LanzhouLandmarks</span>
+    </div>
+    <div style="display: flex; gap: 10px; align-items: center;">
+      <span id="user-display" style="font-size: 0.85rem; color: var(--muted); margin-right: 6px;"></span>
+      <button class="btn btn-ghost" onclick="openNewTaskModal()">+ 新建任务</button>
+      <button class="btn btn-danger" onclick="triggerEmergencyStop()">急停全项目</button>
+      <button class="btn btn-ghost btn-sm" onclick="handleLogout()">退出</button>
+    </div>
+  </header>
+
+  <main class="container">
+    <div id="approvals-container"></div>
+
+    <div class="grid-2">
+      <div class="card" id="worker-grok-card">
+        <div class="card-title">
+          <span><span class="status-dot dot-offline" id="grok-dot"></span>Grok Build 终端 (端 A)</span>
+          <span class="pill pill-queued" id="grok-status-pill">OFFLINE</span>
+        </div>
+        <p style="font-size: 0.85rem; color: var(--muted);" id="grok-desc">等待连接心跳...</p>
+      </div>
+
+      <div class="card" id="worker-codex-card">
+        <div class="card-title">
+          <span><span class="status-dot dot-offline" id="codex-dot"></span>Codex 终端 (端 B)</span>
+          <span class="pill pill-queued" id="codex-status-pill">OFFLINE</span>
+        </div>
+        <p style="font-size: 0.85rem; color: var(--muted);" id="codex-desc">等待连接心跳...</p>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom: 24px;">
+      <div class="card-title">
+        <span>任务调度流水线</span>
+        <button class="btn btn-ghost btn-sm" onclick="fetchTasks()">刷新</button>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>任务标题 / 目标</th>
+            <th>负责人</th>
+            <th>状态</th>
+            <th>重试轮次</th>
+            <th>更新时间</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="task-tbody">
+          <tr><td colspan="7" style="text-align: center; color: var(--muted);">暂无活跃任务</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-title">
+          <span>A2A (Agent-to-Agent) 专属会话通道</span>
+        </div>
+        <div id="messages-container" style="max-height: 260px; overflow-y: auto;">
+          <p style="font-size: 0.85rem; color: var(--muted); text-align: center; margin-top: 30px;">暂无 A2A 协议交互</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">
+          <span>实时事件总线 (SSE 单调游标)</span>
+          <span id="sse-indicator" style="font-size: 0.75rem; color: var(--success);">● 实时连接中</span>
+        </div>
+        <div class="log-box" id="event-log">
+          <div class="log-row"><span class="log-time">[System]</span>控制台已就绪，正在监听 A2A 与任务事件...</div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <div class="modal-overlay" id="task-modal">
+    <div class="modal">
+      <h3 style="font-size: 1rem; margin-bottom: 16px;">新建协作任务</h3>
+      <div class="form-group">
+        <label class="form-label">任务名称</label>
+        <input class="form-input" id="task-title" placeholder="例如：编写地标点击脚本 LandmarkClick.cs" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">目标描述 (Goal)</label>
+        <textarea class="form-textarea" id="task-goal" placeholder="提供 OnMouseDown 触发回调与地标数据绑定接口..."></textarea>
+      </div>
+      <div class="form-group">
+        <label class="form-label">验收标准 (Acceptance Criteria)</label>
+        <textarea class="form-textarea" id="task-criteria" placeholder="C# 编译通过，无 Missing Script，EditMode 测试通过..."></textarea>
+      </div>
+      <div class="form-group">
+        <label class="form-label">指定执行 AI</label>
+        <select class="form-select" id="task-agent">
+          <option value="grok">Grok Build (端 A)</option>
+          <option value="codex">Codex (端 B)</option>
+          <option value="unassigned">自动抢单 (任意先空闲端)</option>
+        </select>
+      </div>
+      <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px;">
+        <button class="btn btn-ghost" onclick="closeNewTaskModal()">取消</button>
+        <button class="btn btn-solid" onclick="submitNewTask()">确认派单</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const PROJECT_ID = "proj_unity_demo";
+    let token = localStorage.getItem("collab_token");
+
+    async function checkAuth() {
+      if (!token) {
+        document.getElementById("login-overlay").style.display = "flex";
+        return;
+      }
+      try {
+        const res = await fetch("/api/auth/me", { headers: { "Authorization": `Bearer ${token}` } });
+        if (res.ok) {
+          const data = await res.json();
+          document.getElementById("login-overlay").style.display = "none";
+          document.getElementById("user-display").innerText = `管理员: ${data.user.username}`;
+          initApp();
+        } else {
+          localStorage.removeItem("collab_token");
+          document.getElementById("login-overlay").style.display = "flex";
+        }
+      } catch(e) {
+        document.getElementById("login-overlay").style.display = "flex";
+      }
+    }
+
+    async function handleLogin(e) {
+      e.preventDefault();
+      const u = document.getElementById("login-user").value.trim();
+      const p = document.getElementById("login-pwd").value.trim();
+      const err = document.getElementById("login-err");
+      err.style.display = "none";
+
+      try {
+        const res = await fetch("/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: u, password: p }),
+        });
+        const data = await res.json();
+        if (res.ok && data.token) {
+          token = data.token;
+          localStorage.setItem("collab_token", token);
+          document.getElementById("login-overlay").style.display = "none";
+          document.getElementById("user-display").innerText = `管理员: ${data.user.username}`;
+          initApp();
+        } else {
+          err.innerText = data.error || "登录失败";
+          err.style.display = "block";
+        }
+      } catch(e) {
+        err.innerText = "网络异常";
+        err.style.display = "block";
+      }
+    }
+
+    function handleLogout() {
+      localStorage.removeItem("collab_token");
+      location.reload();
+    }
+
+    function openNewTaskModal() { document.getElementById("task-modal").style.display = "flex"; }
+    function closeNewTaskModal() { document.getElementById("task-modal").style.display = "none"; }
+
+    async function submitNewTask() {
+      const title = document.getElementById("task-title").value.trim();
+      const goal = document.getElementById("task-goal").value.trim();
+      const acceptanceCriteria = document.getElementById("task-criteria").value.trim();
+      const assignedAgent = document.getElementById("task-agent").value;
+
+      const res = await fetch("/api/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId: PROJECT_ID, title, goal, acceptanceCriteria, assignedAgent }),
+      });
+      if (res.ok) {
+        closeNewTaskModal();
+        fetchTasks();
+      }
+    }
+
+    async function fetchWorkers() {
+      try {
+        const res = await fetch("/api/workers");
+        const workers = await res.json();
+        const now = Date.now();
+        updateWorkerUI("grok", workers.find(w => w.agentType === "grok"), now);
+        updateWorkerUI("codex", workers.find(w => w.agentType === "codex"), now);
+      } catch(e) {}
+    }
+
+    function updateWorkerUI(type, worker, now) {
+      const dot = document.getElementById(`${type}-dot`);
+      const pill = document.getElementById(`${type}-status-pill`);
+      const desc = document.getElementById(`${type}-desc`);
+
+      if (!worker) {
+        dot.className = "status-dot dot-offline";
+        pill.className = "pill pill-queued";
+        pill.innerText = "OFFLINE";
+        desc.innerText = "未注册或尚未连接";
+        return;
+      }
+      const isOnline = (now - new Date(worker.lastHeartbeatAt).getTime()) < 35000;
+      dot.className = isOnline ? "status-dot dot-online" : "status-dot dot-offline";
+      pill.className = isOnline ? "pill pill-completed" : "pill pill-queued";
+      pill.innerText = isOnline ? "ONLINE" : "OFFLINE";
+      desc.innerText = `${worker.hostname} · 最近心跳: ${new Date(worker.lastHeartbeatAt).toLocaleTimeString()}`;
+    }
+
+    async function fetchTasks() {
+      try {
+        const res = await fetch(`/api/projects/${PROJECT_ID}/tasks`);
+        const tasks = await res.json();
+        const tbody = document.getElementById("task-tbody");
+        if (tasks.length === 0) {
+          tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; color: var(--muted);">暂无活跃任务</td></tr>`;
+          return;
+        }
+        tbody.innerHTML = tasks.map(t => `
+          <tr>
+            <td style="font-family: monospace; font-size: 0.78rem;">${t.id.slice(0, 10)}...</td>
+            <td><strong>${escapeHtml(t.title)}</strong><br><span style="font-size: 0.75rem; color: var(--muted);">${escapeHtml(t.goal)}</span></td>
+            <td><span class="pill pill-${t.assignedAgent}">${t.assignedAgent.toUpperCase()}</span></td>
+            <td><span class="pill pill-${t.state}">${t.state}</span></td>
+            <td>${t.currentAttempt} / ${t.budget.maxRepairs}</td>
+            <td style="font-size: 0.78rem; color: var(--muted);">${new Date(t.updatedAt).toLocaleTimeString()}</td>
+            <td>
+              ${t.state === 'running' || t.state === 'leased' ? `<button class="btn btn-ghost btn-sm" onclick="taskAction('${t.id}', 'pause')">暂停</button>` : ''}
+              ${t.state === 'paused' ? `<button class="btn btn-solid btn-sm" onclick="taskAction('${t.id}', 'resume')">继续</button>` : ''}
+              ${t.state !== 'completed' && t.state !== 'cancelled' ? `<button class="btn btn-danger btn-sm" onclick="taskAction('${t.id}', 'cancel')">取消</button>` : ''}
+            </td>
+          </tr>
+        `).join("");
+      } catch(e) {}
+    }
+
+    async function taskAction(id, action) {
+      await fetch(`/api/tasks/${id}/actions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      fetchTasks();
+    }
+
+    async function fetchApprovals() {
+      try {
+        const res = await fetch(`/api/projects/${PROJECT_ID}/approvals?status=pending`);
+        const approvals = await res.json();
+        const container = document.getElementById("approvals-container");
+        if (approvals.length === 0) {
+          container.innerHTML = "";
+          return;
+        }
+        container.innerHTML = approvals.map(appr => `
+          <div class="approval-alert">
+            <div class="approval-text">
+              <strong>⚠️ 待人工审批动作 [${appr.requestedBy.toUpperCase()}]：</strong>
+              <span>${escapeHtml(appr.action)}</span><br>
+              <small>${escapeHtml(appr.description)} · 到期: ${new Date(appr.expiresAt).toLocaleTimeString()}</small>
+            </div>
+            <div style="display: flex; gap: 10px;">
+              <button class="btn btn-success btn-sm" onclick="decideApproval('${appr.id}', 'approved')">批准执行</button>
+              <button class="btn btn-danger btn-sm" onclick="decideApproval('${appr.id}', 'rejected')">拒绝</button>
+            </div>
+          </div>
+        `).join("");
+      } catch(e) {}
+    }
+
+    async function decideApproval(id, decision) {
+      await fetch(`/api/approvals/${id}/decision`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ decision }),
+      });
+      fetchApprovals();
+    }
+
+    async function triggerEmergencyStop() {
+      if (!confirm("确定触发全项目紧急制动（急停）吗？所有正在运行的任务将立刻被终止！")) return;
+      const res = await fetch(`/api/projects/${PROJECT_ID}/tasks`);
+      const tasks = await res.json();
+      for (const t of tasks) {
+        if (t.state === 'running' || t.state === 'leased' || t.state === 'queued') {
+          await taskAction(t.id, 'cancel');
+        }
+      }
+      alert("全项目急停指令已下发！");
+    }
+
+    function initSse() {
+      const source = new EventSource(`/api/events?projectId=${PROJECT_ID}&stream=1`);
+      const logBox = document.getElementById("event-log");
+      source.onmessage = (event) => {
+        try {
+          const ev = JSON.parse(event.data);
+          const row = document.createElement("div");
+          row.className = "log-row";
+          row.innerHTML = `<span class="log-time">[${new Date(ev.createdAt).toLocaleTimeString()}]</span><span class="log-ev">#${ev.id} ${ev.type}</span>${escapeHtml(JSON.stringify(ev.payload))}`;
+          logBox.appendChild(row);
+          logBox.scrollTop = logBox.scrollHeight;
+          if (ev.type.includes("task") || ev.type.includes("run")) fetchTasks();
+          if (ev.type.includes("approval")) fetchApprovals();
+        } catch(e) {}
+      };
+    }
+
+    function escapeHtml(str) {
+      if (!str) return "";
+      return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    }
+
+    function initApp() {
+      fetchWorkers();
+      fetchTasks();
+      fetchApprovals();
+      initSse();
+      setInterval(fetchWorkers, 5000);
+      setInterval(fetchApprovals, 5000);
+    }
+
+    checkAuth();
+  </script>
+</body>
+</html>
