@@ -1,0 +1,74 @@
+import {
+  Project,
+  Worker,
+  Task,
+  Run,
+  Message,
+  Event,
+  Approval,
+  Artifact,
+  TaskState,
+  TaskStateType,
+  isValidStateTransition,
+  CollabError,
+  ErrorCode,
+} from "@ai-collab/contracts";
+
+export interface StorageEngine {
+  init(): Promise<void>;
+  close(): Promise<void>;
+
+  // Project
+  createProject(project: Project): Promise<Project>;
+  getProject(id: string): Promise<Project | null>;
+  listProjects(): Promise<Project[]>;
+
+  // Worker
+  upsertWorker(worker: Worker): Promise<Worker>;
+  getWorker(id: string): Promise<Worker | null>;
+  listWorkers(): Promise<Worker[]>;
+  updateWorkerHeartbeat(workerId: string): Promise<void>;
+
+  // Task
+  createTask(task: Task): Promise<Task>;
+  getTask(id: string): Promise<Task | null>;
+  listTasks(projectId: string, state?: TaskStateType): Promise<Task[]>;
+  updateTaskState(taskId: string, newState: TaskStateType, expectedVersion?: number): Promise<Task>;
+
+  // Run & Lease (带行锁抢单)
+  claimAvailableTask(
+    workerId: string,
+    projectId: string,
+    agentType: "grok" | "codex",
+    leaseSeconds: number
+  ): Promise<{ task: Task; run: Run } | null>;
+  renewLease(runId: string, workerId: string, fencingToken: number, extendSeconds: number): Promise<Run>;
+  submitRun(runId: string, workerId: string, fencingToken: number, summary: string): Promise<Run>;
+  reapExpiredLeases(): Promise<number>;
+
+  // Messages
+  saveMessage(message: Message): Promise<{ message: Message; duplicate: boolean }>;
+  listMessages(taskId: string, threadId?: string): Promise<Message[]>;
+
+  // Events & Outbox
+  emitEvent(projectId: string, type: string, payload: Record<string, unknown>, taskId?: string, runId?: string): Promise<Event>;
+  listEvents(projectId: string, afterCursor?: number, limit?: number): Promise<Event[]>;
+
+  // Approvals
+  createApproval(approval: Approval): Promise<Approval>;
+  getApproval(id: string): Promise<Approval | null>;
+  listApprovals(projectId: string, status?: string): Promise<Approval[]>;
+  decideApproval(id: string, decision: "approved" | "rejected", decidedBy: string): Promise<Approval>;
+
+  // Artifacts
+  saveArtifact(artifact: Artifact): Promise<Artifact>;
+  listArtifacts(taskId: string): Promise<Artifact[]>;
+
+  // Users & Auth (离线管理员注册，无公开注册入口)
+  createUser(user: { id: string; username: string; passwordHash: string; role?: "admin" | "member"; createdAt?: string }): Promise<{ id: string; username: string; passwordHash: string; role: "admin" | "member"; createdAt: string }>;
+  getUserByUsername(username: string): Promise<{ id: string; username: string; passwordHash: string; role: "admin" | "member"; createdAt: string } | null>;
+
+  // A2A Agent-to-Agent Envelope
+  saveA2AEnvelope(envelope: any): Promise<{ envelope: any; duplicate: boolean }>;
+  listA2AEnvelopes(taskId: string, conversationId?: string): Promise<any[]>;
+}

@@ -1,0 +1,10 @@
+{
+  "name": "ai-collab-monorepo",
+  "private": true,
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "collab:doctor": "node scripts/doctor.mjs"
+  },
+  "packageManager": "pnpm@10.27.0"
+}
