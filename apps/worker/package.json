@@ -11,7 +11,8 @@
   "dependencies": {
     "@ai-collab/contracts": "workspace:*",
     "@ai-collab/adapter-grok": "workspace:*",
-    "@ai-collab/adapter-codex": "workspace:*"
+    "@ai-collab/adapter-codex": "workspace:*",
+    "@ai-collab/uvcs-workspace": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
