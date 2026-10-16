@@ -146,3 +146,37 @@ test("Hub API: 完整调度、离线用户登录与 A2A 协议测试", async () 
     await app.close();
   }
 });
+
+test("Worker 在线状态由服务器时钟决定", async () => {
+  const storage = new MemoryStorageEngine();
+  await storage.upsertWorker({
+    id: "worker_grok_01",
+    agentType: "grok",
+    name: "Grok",
+    hostname: "pc-a",
+    capabilities: [],
+    status: "offline",
+    lastHeartbeatAt: new Date().toISOString(),
+  });
+  await storage.upsertWorker({
+    id: "worker_codex_01",
+    agentType: "codex",
+    name: "Codex",
+    hostname: "pc-b",
+    capabilities: [],
+    status: "online",
+    lastHeartbeatAt: new Date(Date.now() - 120_000).toISOString(),
+  });
+
+  const app = await buildServer({ storage });
+  await app.ready();
+  try {
+    const res = await app.inject({ method: "GET", url: "/api/workers" });
+    assert.equal(res.statusCode, 200);
+    const workers = JSON.parse(res.body) as Array<{ id: string; status: string }>;
+    assert.equal(workers.find((worker) => worker.id === "worker_grok_01")?.status, "online");
+    assert.equal(workers.find((worker) => worker.id === "worker_codex_01")?.status, "offline");
+  } finally {
+    await app.close();
+  }
+});

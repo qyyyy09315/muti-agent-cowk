@@ -16,6 +16,31 @@ import {
 } from "@ai-collab/contracts";
 import { StorageEngine } from "./types.js";
 
+/** 控制台在线窗口。必须用服务器时钟判断，浏览器时钟偏差会让 Worker 在 ONLINE / OFFLINE 之间闪烁。 */
+const WORKER_ONLINE_WINDOW_MS = 35_000;
+
+function withLiveWorkerStatus(worker: Worker, now = Date.now()): Worker {
+  const beat = Date.parse(worker.lastHeartbeatAt);
+  const age = now - beat;
+  const fresh = Number.isFinite(beat) && age < WORKER_ONLINE_WINDOW_MS && age > -5_000;
+  if (!fresh) return { ...worker, status: "offline" };
+  if (worker.status === "busy") return { ...worker };
+  return { ...worker, status: "online" };
+}
+
+function mapWorkerRow(row: any): Worker {
+  return {
+    id: row.id,
+    agentType: row.agent_type,
+    name: row.name,
+    hostname: row.hostname,
+    capabilities: row.capabilities,
+    status: row.status,
+    version: row.version,
+    lastHeartbeatAt: row.last_heartbeat_at.toISOString(),
+  };
+}
+
 // ==================== 1. 内存存储实现（用于单元测试与快速校验） ====================
 
 export class MemoryStorageEngine implements StorageEngine {
@@ -56,11 +81,12 @@ export class MemoryStorageEngine implements StorageEngine {
   }
 
   async getWorker(id: string): Promise<Worker | null> {
-    return this.workers.get(id) || null;
+    const worker = this.workers.get(id);
+    return worker ? withLiveWorkerStatus(worker) : null;
   }
 
   async listWorkers(): Promise<Worker[]> {
-    return Array.from(this.workers.values());
+    return Array.from(this.workers.values()).map((worker) => withLiveWorkerStatus(worker));
   }
 
   async updateWorkerHeartbeat(workerId: string): Promise<void> {
@@ -467,31 +493,12 @@ export class PostgresStorageEngine implements StorageEngine {
   async getWorker(id: string): Promise<Worker | null> {
     const res = await this.pool.query(`SELECT * FROM workers WHERE id = $1`, [id]);
     if (!res.rows[0]) return null;
-    const r = res.rows[0];
-    return {
-      id: r.id,
-      agentType: r.agent_type,
-      name: r.name,
-      hostname: r.hostname,
-      capabilities: r.capabilities,
-      status: r.status,
-      version: r.version,
-      lastHeartbeatAt: r.last_heartbeat_at.toISOString(),
-    };
+    return withLiveWorkerStatus(mapWorkerRow(res.rows[0]));
   }
 
   async listWorkers(): Promise<Worker[]> {
     const res = await this.pool.query(`SELECT * FROM workers ORDER BY last_heartbeat_at DESC`);
-    return res.rows.map((r) => ({
-      id: r.id,
-      agentType: r.agent_type,
-      name: r.name,
-      hostname: r.hostname,
-      capabilities: r.capabilities,
-      status: r.status,
-      version: r.version,
-      lastHeartbeatAt: r.last_heartbeat_at.toISOString(),
-    }));
+    return res.rows.map((row) => withLiveWorkerStatus(mapWorkerRow(row)));
   }
 
   async updateWorkerHeartbeat(workerId: string): Promise<void> {
