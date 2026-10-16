@@ -127,11 +127,13 @@ export class UVCSClient {
 
   /**
    * 在 base changeset 上为具体任务创建独立分支: br:/main/ai/<taskId>/<agentId>
+   * 采用官方受支持的 --changeset=cs:<num> 语法格式
    */
   async createBranch(workspaceDir: string, branchName: string, baseChangeset?: string): Promise<string> {
     const args = ["branch", "create", branchName];
     if (baseChangeset) {
-      args.push(baseChangeset.startsWith("cs:") ? baseChangeset : `cs:${baseChangeset}`);
+      const cs = baseChangeset.startsWith("cs:") ? baseChangeset : `cs:${baseChangeset}`;
+      args.push(`--changeset=${cs}`);
     }
     await this.execCm(args, workspaceDir);
     return branchName;
