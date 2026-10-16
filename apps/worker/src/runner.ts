@@ -1,6 +1,10 @@
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
+import { fileURLToPath } from "node:url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 import { HubClient } from "./client.js";
 import { GrokAdapter } from "@ai-collab/adapter-grok";
 import { CodexAdapter } from "@ai-collab/adapter-codex";
@@ -26,6 +30,7 @@ export class WorkerRunner {
   readonly client: HubClient;
   readonly uvcs: UVCSClient;
   public leaseLost = false;
+  public lastCleanupStatus: "succeeded" | "frozen_due_to_backup_failure" | "normal" = "normal";
   private running = false;
   private currentRunId: string | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
@@ -43,6 +48,9 @@ export class WorkerRunner {
   async start(): Promise<void> {
     this.running = true;
     console.log(`[Worker-${this.config.agentType}]: 正在启动常驻守护进程 (Worker ID: ${this.workerId})...`);
+
+    // 启动时非阻塞检查 GitHub 远程版本
+    this.checkRemoteVersionNonBlocking();
 
     await this.client.registerWorker({
       id: this.workerId,
@@ -101,6 +109,22 @@ export class WorkerRunner {
         backoffMs = Math.min(backoffMs * 2, 30000);
       }
     }
+  }
+
+  private checkRemoteVersionNonBlocking(): void {
+    Promise.resolve().then(async () => {
+      try {
+        const updateScript = path.resolve(__dirname, "..", "..", "..", "scripts", "check-update.mjs");
+        if (fs.existsSync(updateScript)) {
+          const { checkForUpdates } = await import(`file://${updateScript}`);
+          const res = await checkForUpdates({ timeoutMs: 3000 });
+          if (res && res.updateAvailable) {
+            console.warn(`\n📢 [GitHub 版本升级提醒]: 检测到远程 main 分支有更新 (本地: ${res.localCommit} -> 远程: ${res.remoteCommit})`);
+            console.warn(`📢 建议运行命令更新: ${res.updateCommand}\n`);
+          }
+        }
+      } catch {}
+    });
   }
 
   public assertLeaseActive(): void {
@@ -265,8 +289,9 @@ export class WorkerRunner {
       console.error(`[Pipeline 失败]: 流程中断:`, (pipelineErr as Error).message);
       throw pipelineErr;
     } finally {
-      // 关键修复 2：失败清理前必须先完整保存修改到检查点目录！
-      // 杜绝 undocheckout 默认将已修改文件还原（revert）回签出前版本导致工作成果灰飞烟灭
+      // 核心数据保全法则：失败清理前必须先完整保存修改到检查点目录！
+      // 若备份失败，绝对严禁调用 undocheckout（否则本地修改会被强制 revert 抹杀），绝对严禁删除工作空间！
+      let backupSucceeded = false;
       if (!pipelineSucceeded) {
         try {
           const checkpointDir = path.join(
@@ -276,31 +301,55 @@ export class WorkerRunner {
           );
           console.log(`[Pipeline 安全保护]: 检测到任务未成功签入，在释放锁/清理前将修改完整备份归档至: ${checkpointDir}...`);
           this.saveCheckpoint(taskWsDir, checkpointDir, acquiredLocks, task.id);
+
+          // 严格核查：清单文件必须真实物理落盘！
+          if (fs.existsSync(path.join(checkpointDir, "manifest.json"))) {
+            backupSucceeded = true;
+          } else {
+            throw new Error(`检查点清单文件 manifest.json 缺失，无法确认备份完整性！`);
+          }
         } catch (backupErr) {
-          console.warn(`[Pipeline 安全保护]: 备份改动遇到提示:`, (backupErr as Error).message);
+          console.error(
+            `🚨 [Pipeline 数据保全致命告警]: 检查点备份归档失败 (${(backupErr as Error).message})！\n` +
+            `为绝对防止工作成果被覆盖丢失，系统已紧急触发安全死锁：\n` +
+            `1. 坚决禁止调用 undocheckout（否则本地修改会被强制 revert 还原）！\n` +
+            `2. 坚决禁止注销/删除工作空间（保留现场以供人工抢救提取）！\n` +
+            `受保护的工作空间物理路径: ${taskWsDir}`
+          );
         }
       }
 
-      // 释放排他锁：在修改已完整归档后，安全执行 undocheckout 释放持有的锁
-      if (acquiredLocks.length > 0) {
-        console.log(`[Pipeline 清理]: 正在释放本任务实际持有的 ${acquiredLocks.length} 个排他资源锁...`);
-        for (const lp of acquiredLocks) {
-          try {
-            await this.uvcs.unlockFile(taskWsDir, lp);
-            console.log(`[Pipeline 清理]: 已精准释放持有的排他锁: ${lp}`);
-          } catch (unlockErr) {
-            console.warn(`[Pipeline 清理]: 释放锁异常 (${lp}):`, (unlockErr as Error).message);
+      // 仅当【正常成功签入提交】或【改动已 100% 确认安全归档】时，才允许撤销锁和清理临时工作空间！
+      const canSafelyCleanup = pipelineSucceeded || backupSucceeded;
+
+      if (!canSafelyCleanup) {
+        this.lastCleanupStatus = "frozen_due_to_backup_failure";
+        console.warn(
+          `⚠️ [安全冻结现场]: 因备份未成功落盘，已阻止执行 unlockFile 与 deleteWorkspace，现场完整冻结在: ${taskWsDir}`
+        );
+      } else {
+        this.lastCleanupStatus = "succeeded";
+        // 释放排他锁：在修改已完整归档后，安全执行 undocheckout 释放持有的锁
+        if (acquiredLocks.length > 0) {
+          console.log(`[Pipeline 清理]: 正在释放本任务实际持有的 ${acquiredLocks.length} 个排他资源锁...`);
+          for (const lp of acquiredLocks) {
+            try {
+              await this.uvcs.unlockFile(taskWsDir, lp);
+              console.log(`[Pipeline 清理]: 已精准释放持有的排他锁: ${lp}`);
+            } catch (unlockErr) {
+              console.warn(`[Pipeline 清理]: 释放锁异常 (${lp}):`, (unlockErr as Error).message);
+            }
           }
         }
-      }
 
-      // 清理临时独立任务工作空间
-      if (createdTaskWorkspace) {
-        try {
-          console.log(`[Pipeline 清理]: 正在注销任务临时工作空间: ${taskWkName}...`);
-          await this.uvcs.deleteWorkspace(taskWkName);
-        } catch (delErr) {
-          console.warn(`[Pipeline 清理]: 注销临时工作空间提示:`, (delErr as Error).message);
+        // 清理临时独立任务工作空间
+        if (createdTaskWorkspace) {
+          try {
+            console.log(`[Pipeline 清理]: 正在注销任务临时工作空间: ${taskWkName}...`);
+            await this.uvcs.deleteWorkspace(taskWkName);
+          } catch (delErr) {
+            console.warn(`[Pipeline 清理]: 注销临时工作空间提示:`, (delErr as Error).message);
+          }
         }
       }
     }

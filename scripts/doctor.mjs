@@ -140,6 +140,20 @@ async function runDoctor() {
     }
   }
 
+  // 9. GitHub 远程最新版本检查
+  try {
+    const { checkForUpdates } = await import("./check-update.mjs");
+    const update = await checkForUpdates({ timeoutMs: 3000 });
+    if (update.updateAvailable) {
+      console.warn(`[9] GitHub 远程版本状态: 发现更新! (本地 ${update.localCommit} -> 远程 ${update.remoteCommit}) ... ⚠️ 建议更新`);
+      console.log(`    更新命令: ${update.updateCommand}`);
+    } else {
+      console.log(`[9] GitHub 远程版本状态: 已与远程保持最新 (${update.localCommit}) ... ✔ 最新`);
+    }
+  } catch (updErr) {
+    console.log(`[9] GitHub 远程版本状态: 检查跳过 (${updErr.message}) ... ℹ 提示`);
+  }
+
   console.log("\n-----------------------------------------------------------------");
   if (criticalPass) {
     console.log("🎉 全链路诊断完成：核心管道、stdin通信、MCP流协议与安全门禁均达到工业标准！");

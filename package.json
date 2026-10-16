@@ -4,7 +4,8 @@
   "scripts": {
     "build": "pnpm -r build",
     "test": "pnpm -r test",
-    "collab:doctor": "node scripts/doctor.mjs"
+    "collab:doctor": "node scripts/doctor.mjs",
+    "collab:check-update": "node scripts/check-update.mjs"
   },
   "packageManager": "pnpm@10.27.0"
 }
