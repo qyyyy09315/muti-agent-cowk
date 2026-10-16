@@ -324,13 +324,12 @@
       try {
         const res = await fetch("/api/workers");
         const workers = await res.json();
-        const now = Date.now();
-        updateWorkerUI("grok", workers.find(w => w.agentType === "grok"), now);
-        updateWorkerUI("codex", workers.find(w => w.agentType === "codex"), now);
+        updateWorkerUI("grok", workers.find(w => w.agentType === "grok"));
+        updateWorkerUI("codex", workers.find(w => w.agentType === "codex"));
       } catch(e) {}
     }
 
-    function updateWorkerUI(type, worker, now) {
+    function updateWorkerUI(type, worker) {
       const dot = document.getElementById(`${type}-dot`);
       const pill = document.getElementById(`${type}-status-pill`);
       const desc = document.getElementById(`${type}-desc`);
@@ -342,7 +341,7 @@
         desc.innerText = "未注册或尚未连接";
         return;
       }
-      const isOnline = (now - new Date(worker.lastHeartbeatAt).getTime()) < 35000;
+      const isOnline = worker.status === "online" || worker.status === "busy";
       dot.className = isOnline ? "status-dot dot-online" : "status-dot dot-offline";
       pill.className = isOnline ? "pill pill-completed" : "pill pill-queued";
       pill.innerText = isOnline ? "ONLINE" : "OFFLINE";
