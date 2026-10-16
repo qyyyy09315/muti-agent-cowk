@@ -98,7 +98,6 @@ test("E2E-1: 工业级全流程交付测试 (带新鲜编译日志、stdin 写�
     });
     assert.ok(claim);
 
-    // 产生本次任务运行中生成的新鲜 Editor.log（模拟由 Unity 编译产生的日志）
     const logWriter = setInterval(() => {
       fs.writeFileSync(path.join(tmpWs, "Editor.log"), "Compilation succeeded: 0 error(s), 0 warnings\nBuild finished.");
     }, 40);
@@ -225,7 +224,6 @@ test("E2E-3: 漏洞 3 验收 - 第二个文件加锁失败后，清理逻辑只�
   };
 
   runner.uvcs.getStatus = async () => ({ branch: "/main", changeset: "cs:1", repository: "repo@cloud", pendingChanges: [] });
-  // 在创建 workspace 时，为新创建的独立工作空间拷贝/建立 Assets 目录
   runner.uvcs.createWorkspace = async (name, targetWs) => {
     fs.mkdirSync(path.join(targetWs, "Assets"), { recursive: true });
     fs.writeFileSync(path.join(targetWs, "Assets", "SceneA.unity"), "A");
@@ -248,12 +246,8 @@ test("E2E-3: 漏洞 3 验收 - 第二个文件加锁失败后，清理逻辑只�
     await runner.executePipeline(mockTask, mockRun);
   }, /already locked by user/);
 
-  // 核心断言：
-  // 1. 成功锁定了 SceneA
   assert.equal(realLocked.length, 1);
   assert.ok(realLocked[0].includes("SceneA"));
-
-  // 2. 在 finally 释放时，只精准释放了 SceneA，绝对没有对未取得锁的 SceneB 调用 unlockFile！
   assert.equal(realUnlocked.length, 1);
   assert.ok(realUnlocked[0].includes("SceneA"));
   assert.equal(realUnlocked.some(p => p.includes("SceneB")), false, "绝不能尝试释放未取得的锁！");
@@ -300,13 +294,10 @@ test("E2E-4: 漏洞 2 验收 - 独立任务工作区隔离（绝不切换与污�
 
   await runner.executePipeline(mockTask, mockRun);
 
-  // 核心断言：
-  // 1. 成功在独立目录下创建了临时任务工作空间，而不是直接在 baseWs 上跑
   assert.equal(createdWorkspaces.length, 1);
   assert.ok(createdWorkspaces[0].path.startsWith(taskBaseDir));
   assert.notEqual(createdWorkspaces[0].path, baseWs);
 
-  // 2. switchBranch 操作仅发生在独立任务工作空间上，baseWs 从未被切换分支！
   assert.equal(switchedWorkspaces.length, 1);
   assert.notEqual(switchedWorkspaces[0].ws, baseWs, "baseWs 原工作区绝对不能被切换分支！");
   assert.ok(switchedWorkspaces[0].ws.startsWith(taskBaseDir), "切换分支必须发生在专属任务隔离工作区");
@@ -401,4 +392,89 @@ test("E2E-7: 原生 cm status --header 输出格式真实正则解析测试", ()
   assert.equal(match[1].trim(), "/main/geng");
   assert.equal(match[2].trim(), "LanzhouLandmarks/LanzhouLandmarks@qiangdao977@unity");
   assert.equal(match[3].trim(), "cs:8");
+});
+
+test("E2E-8: 新增规范验收 - cm branch create 参数必须采用官方 --changeset=cs:<num> 语法", async () => {
+  const client = new UVCSClient();
+  let executedArgs = [];
+  client.execCm = async (args) => {
+    executedArgs = args;
+    return { stdout: "ok", stderr: "", code: 0 };
+  };
+
+  // 1. 传入 cs:8
+  await client.createBranch("C:/ws", "br:/main/ai/task_1/codex", "cs:8");
+  assert.deepEqual(executedArgs, ["branch", "create", "br:/main/ai/task_1/codex", "--changeset=cs:8"]);
+
+  // 2. 传入纯数字 8
+  await client.createBranch("C:/ws", "br:/main/ai/task_2/codex", "8");
+  assert.deepEqual(executedArgs, ["branch", "create", "br:/main/ai/task_2/codex", "--changeset=cs:8"]);
+});
+
+test("E2E-9: 新增规范验收 - 失败清理前必须先完整保存修改到检查点目录，防止 undocheckout 丢失工作成果", async () => {
+  const baseWs = fs.mkdtempSync(path.join(os.tmpdir(), "base_ws_preserve_"));
+  const taskParent = fs.mkdtempSync(path.join(os.tmpdir(), "task_ws_preserve_"));
+
+  const runner = new WorkerRunner({
+    hubUrl: "http://127.0.0.1:9999",
+    projectId: "proj_preserve",
+    agentType: "codex",
+    workspaceDir: baseWs,
+    taskWorkspaceBaseDir: taskParent,
+  });
+
+  let undocheckoutCalled = false;
+  let backupExistedBeforeUnlock = false;
+
+  runner.uvcs.getStatus = async () => ({ branch: "/main", changeset: "cs:8", repository: "repo@cloud", pendingChanges: [] });
+  runner.uvcs.createWorkspace = async (name, targetWs) => {
+    fs.mkdirSync(path.join(targetWs, "Assets", "Scenes"), { recursive: true });
+    fs.writeFileSync(path.join(targetWs, "Assets", "Scenes.meta"), "guid: scenes_dir");
+    fs.writeFileSync(path.join(targetWs, "Assets", "Scenes", "CrucialScene.unity"), "unity scene text binary data 42");
+    fs.writeFileSync(path.join(targetWs, "Assets", "Scenes", "CrucialScene.unity.meta"), "guid: scene999");
+  };
+  runner.uvcs.deleteWorkspace = async () => {};
+  runner.uvcs.createBranch = async () => "/main";
+  runner.uvcs.switchBranch = async () => {};
+  runner.uvcs.lockFile = async () => true;
+
+  runner.uvcs.unlockFile = async (ws, itemPath) => {
+    undocheckoutCalled = true;
+    // 检查在调用 undocheckout 之前，检查点备份是否已经存在且完整
+    const checkpointDir = path.join(baseWs, ".collab_checkpoints", "task_task_abort_attempt_1");
+    if (fs.existsSync(path.join(checkpointDir, "manifest.json")) && 
+        fs.existsSync(path.join(checkpointDir, "Assets", "Scenes", "CrucialScene.unity"))) {
+      backupExistedBeforeUnlock = true;
+    }
+    return true;
+  };
+
+  // 模拟模型执行完毕但后续故意抛出异常（例如门禁未通过），触发 finally 失败清理
+  runner["adapter"].executeTask = async () => ({ success: true, summary: "ok", exitCode: 0 });
+
+  const mockTask = {
+    id: "task_abort",
+    title: "测试失败保留现场",
+    goal: "修改 CrucialScene.unity",
+  };
+  const mockRun = { id: "run_abort", fencingToken: 1, attempt: 1 };
+
+  await assert.rejects(async () => {
+    await runner.executePipeline(mockTask, mockRun);
+  });
+
+  // 严密断言：
+  // 1. 验证确实调用了 undocheckout
+  assert.equal(undocheckoutCalled, true, "必须调用 undocheckout 释放锁！");
+
+  // 2. 在执行 undocheckout 之前，文件改动已完成物理归档备份！
+  assert.equal(backupExistedBeforeUnlock, true, "在 undocheckout 前必须已完整备份修改文件！");
+
+  // 3. 检查生成的检查点内容和清单文件
+  const checkpointDir = path.join(baseWs, ".collab_checkpoints", "task_task_abort_attempt_1");
+  const manifest = JSON.parse(fs.readFileSync(path.join(checkpointDir, "manifest.json"), "utf-8"));
+  assert.equal(manifest.taskId, "task_abort");
+  assert.ok(manifest.backedUpFiles.some(f => f.includes("CrucialScene.unity")));
+  const savedContent = fs.readFileSync(path.join(checkpointDir, "Assets", "Scenes", "CrucialScene.unity"), "utf-8");
+  assert.equal(savedContent, "unity scene text binary data 42", "备份的内容必须 100% 完整无损！");
 });
