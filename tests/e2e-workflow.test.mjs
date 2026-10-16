@@ -478,3 +478,66 @@ test("E2E-9: 新增规范验收 - 失败清理前必须先完整保存修改到�
   const savedContent = fs.readFileSync(path.join(checkpointDir, "Assets", "Scenes", "CrucialScene.unity"), "utf-8");
   assert.equal(savedContent, "unity scene text binary data 42", "备份的内容必须 100% 完整无损！");
 });
+
+test("E2E-10: 故障注入回归验收 - 当备份归档失败时，坚决禁止调用 undocheckout 与 deleteWorkspace，安全冻结现场保留数据", async () => {
+  const baseWs = fs.mkdtempSync(path.join(os.tmpdir(), "base_ws_freeze_"));
+  const taskParent = fs.mkdtempSync(path.join(os.tmpdir(), "task_ws_freeze_"));
+
+  const runner = new WorkerRunner({
+    hubUrl: "http://127.0.0.1:9999",
+    projectId: "proj_freeze",
+    agentType: "codex",
+    workspaceDir: baseWs,
+    taskWorkspaceBaseDir: taskParent,
+  });
+
+  let undocheckoutCalled = false;
+  let deleteWorkspaceCalled = false;
+
+  runner.uvcs.getStatus = async () => ({ branch: "/main", changeset: "cs:8", repository: "repo@cloud", pendingChanges: [] });
+  runner.uvcs.createWorkspace = async (name, targetWs) => {
+    fs.mkdirSync(path.join(targetWs, "Assets", "Scenes"), { recursive: true });
+    fs.writeFileSync(path.join(targetWs, "Assets", "Scenes", "Precious.unity"), "precious unsaved changes");
+    fs.writeFileSync(path.join(targetWs, "Assets", "Scenes", "Precious.unity.meta"), "guid: prec1");
+  };
+  runner.uvcs.createBranch = async () => "/main";
+  runner.uvcs.switchBranch = async () => {};
+  runner.uvcs.lockFile = async () => true;
+
+  // 监控是否触发了危险的还原与删除
+  runner.uvcs.unlockFile = async () => {
+    undocheckoutCalled = true;
+    return true;
+  };
+  runner.uvcs.deleteWorkspace = async () => {
+    deleteWorkspaceCalled = true;
+  };
+
+  // 故障注入：故意让 saveCheckpoint 抛出致命 IO 异常（模拟磁盘满或路径写权限阻断）
+  runner.saveCheckpoint = () => {
+    throw new Error("Simulated fatal disk I/O error during checkpoint backup");
+  };
+
+  const mockTask = {
+    id: "task_fault_inject",
+    title: "测试备份失败防抹杀",
+    goal: "编辑 Precious.unity",
+  };
+  const mockRun = { id: "run_fault", fencingToken: 1, attempt: 1 };
+
+  // 运行管线：由于门禁或适配器失败抛错进入 finally，但在 finally 中备份失败触发安全死锁
+  await assert.rejects(async () => {
+    await runner.executePipeline(mockTask, mockRun);
+  });
+
+  // 核心断言：
+  // 1. 现场被紧急冻结，记录状态为 frozen_due_to_backup_failure
+  assert.equal(runner.lastCleanupStatus, "frozen_due_to_backup_failure");
+
+  // 2. 绝对没有调用 undocheckout！(一旦调用本地修改就会被 Plastic SCM revert 还原清空)
+  assert.equal(undocheckoutCalled, false, "备份失败时严禁执行 undocheckout 抹杀修改！");
+
+  // 3. 绝对没有调用 deleteWorkspace！(临时工作区目录被保留，等待人工提取)
+  assert.equal(deleteWorkspaceCalled, false, "备份失败时严禁注销/删除工作空间！");
+});
+
