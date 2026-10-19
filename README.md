@@ -101,10 +101,10 @@ Both machines must run this version for automatic receiving on both ends.
 
 ```powershell
 # Terminal A: retain the Hub's existing grok routing role; actual chat executor is Codex.
-pnpm --filter @ai-collab/worker start --type grok --worker-id worker_grok_local --hub https://hub.example.com --project proj_lanzhou_landmarks --messages-only
+pnpm --filter @ai-collab/worker start --type grok --worker-id worker_grok_local --hub https://<your-hub-domain> --project <project_id> --messages-only
 
 # Terminal B: run on the other computer (stop its previous Worker before replacing it).
-pnpm --filter @ai-collab/worker start --type codex --worker-id worker_codex_example --hub https://hub.example.com --project proj_lanzhou_landmarks --messages-only
+pnpm --filter @ai-collab/worker start --type codex --worker-id worker_codex_local --hub https://<your-hub-domain> --project <project_id> --messages-only
 ```
 
 Use your own Hub URL/project/Worker IDs. `--type` selects the **routing role**;
