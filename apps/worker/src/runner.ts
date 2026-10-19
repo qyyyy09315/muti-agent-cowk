@@ -2,6 +2,10 @@ import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
+import { MessageListener } from "./message-listener.js";
+import { CodexMessageResponder } from "./codex-message-responder.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -22,6 +26,9 @@ export interface WorkerConfig {
   taskWorkspaceBaseDir?: string; // 独立任务工作区根目录
   skipUvcsIsolation?: boolean;   // 仅用于离线极简单元测试
   skipCompileGate?: boolean;     // 仅用于不涉及 Unity 编译的纯文本任务测试
+  listenMessages?: boolean;
+  messagesOnly?: boolean;
+  messageStateDir?: string;
 }
 
 export class WorkerRunner {
@@ -36,6 +43,9 @@ export class WorkerRunner {
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private leaseRenewTimer: NodeJS.Timeout | null = null;
   private adapter: GrokAdapter | CodexAdapter;
+  private readonly messageAbort = new AbortController();
+  private messageLoop?: Promise<void>;
+  private messageFailure?: Error;
 
   constructor(config: WorkerConfig) {
     this.config = config;
@@ -72,15 +82,43 @@ export class WorkerRunner {
       }
     }, 15000);
 
+    if (this.config.listenMessages || this.config.messagesOnly) {
+      const scope = createHash('sha256').update(JSON.stringify([
+        this.client.baseUrl, this.config.projectId, this.config.agentType,
+      ])).digest('hex').slice(0, 24);
+      const stateFile = path.join(this.config.messageStateDir || path.join(os.homedir(), '.ai-collab', 'inbox'), `${scope}.json`);
+      let listener: MessageListener;
+      try {
+        listener = new MessageListener(this.client, new CodexMessageResponder(),
+          this.config.projectId, this.config.agentType, stateFile);
+      } catch (error) {
+        await this.stop();
+        throw error;
+      }
+      this.messageLoop = listener.run(this.messageAbort.signal).catch(error => {
+        this.messageFailure = error;
+        this.running = false;
+        this.messageAbort.abort();
+        console.error('[Message listener stopped]', error.message);
+      });
+      console.log(`[Messages]: Codex responder enabled for role ${this.config.agentType}; cursor: ${stateFile}`);
+    }
+
     let backoffMs = 2000;
     while (this.running) {
       try {
+        if (this.config.messagesOnly) {
+          await delay(1000, undefined, { signal: this.messageAbort.signal });
+          continue;
+        }
         const claimResult = await this.client.claimRun({
           workerId: this.workerId,
           projectId: this.config.projectId,
           agentType: this.config.agentType,
           timeoutSeconds: 15,
         });
+
+        if (!this.running) break;
 
         backoffMs = 2000;
 
@@ -104,11 +142,14 @@ export class WorkerRunner {
           }
         }
       } catch (pollErr) {
+        if (!this.running) break;
         console.warn(`[Worker-${this.config.agentType}]: 轮询异常，${backoffMs / 1000}s 后重试...`, (pollErr as Error).message);
         await new Promise((r) => setTimeout(r, backoffMs));
         backoffMs = Math.min(backoffMs * 2, 30000);
       }
     }
+    await this.stop();
+    if (this.messageFailure) throw this.messageFailure;
   }
 
   private checkRemoteVersionNonBlocking(): void {
@@ -442,9 +483,11 @@ export class WorkerRunner {
 
   async stop(): Promise<void> {
     this.running = false;
+    this.messageAbort.abort();
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.stopLeaseRenewal();
     await this.adapter.cancel();
+    await this.messageLoop;
     console.log(`[Worker-${this.config.agentType}]: 守护进程已安全停止`);
   }
 }

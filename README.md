@@ -91,6 +91,77 @@ Run the built-in diagnostic tool to verify environment and Hub connectivity:
 node scripts/doctor.mjs
 ```
 
+### 5. Automatic peer messages (Codex responder)
+
+Workers can now receive Hub `message_sent` events and automatically answer initial
+peer questions with a local Codex CLI. Enable this explicitly with
+`--listen-messages` alongside the normal task runner, or use `--messages-only`
+to send heartbeats and handle chat without claiming tasks or running Unity/UVCS.
+Both machines must run this version for automatic receiving on both ends.
+
+```powershell
+# Terminal A: retain the Hub's existing grok routing role; actual chat executor is Codex.
+pnpm --filter @ai-collab/worker start --type grok --worker-id worker_grok_local --hub https://<your-hub-domain> --project <project_id> --messages-only
+
+# Terminal B: run on the other computer (stop its previous Worker before replacing it).
+pnpm --filter @ai-collab/worker start --type codex --worker-id worker_codex_local --hub https://<your-hub-domain> --project <project_id> --messages-only
+```
+
+Use your own Hub URL/project/Worker IDs. `--type` selects the **routing role**;
+the new message responder always uses Codex, including Terminal A's `grok` role.
+The existing task adapters are unchanged. Run only one message listener for each
+Hub/project/role. Stop any previous heartbeat bridge for the same Worker ID.
+
+Prerequisites: install a current Codex CLI supporting `--ignore-user-config`,
+`--ephemeral`, and the `shell_tool`/`unified_exec` feature flags; sign in locally
+with `codex login`. `CODEX_BIN` can point to a native executable or the npm
+package's `@openai/codex/bin/codex.js`. Windows npm `codex.cmd` installations are
+resolved to that JS entry point without launching a command shell.
+
+Send questions using existing MCP `peer_ask` or `POST /api/messages`, with a real
+`taskId`, shared `threadId`, `fromAgent` and `toAgent`. Root messages have a null
+`replyToId`. Answers preserve the task/thread and set `replyToId` to the question
+ID. Incoming answers are printed as `[Message received]` in the Worker log; they
+do **not** generate further automatic answers. Start a new root message for a
+follow-up question. Cancelled tasks receive no automatic replies. This version
+consumes ordinary messages, not the separate `/api/a2a/send` envelope stream.
+
+The listener polls every two seconds with a durable event cursor. First startup
+reads the existing event backlog, including unanswered old questions. Received
+questions run serially; failures retry with backoff and retain the cursor. A
+generated reply is saved before sending and retried with a stable idempotency
+key, so losing a POST response or restarting does not duplicate the Hub reply.
+A crash before saving generated text can rerun inference. Each reply has a
+120-second process timeout and a 16,000-character limit. Repeated model/login
+errors block that inbox at the failed question until fixed; inspect the retry log.
+
+State lives outside Unity at `~/.ai-collab/inbox`, scoped by Hub/project/role.
+Use `--message-state-dir <directory>` for another persistent local location;
+preserve it across restarts. Do not share this directory across computers.
+Its local process lock prevents duplicate listeners on one machine. Hub reply
+deduplication also applies across machines, but simultaneous responders on two
+machines can still spend tokens twice; assign one receiver per role.
+
+Replies run in separate ephemeral CLI sessions in temporary directories with a
+read-only sandbox, shell execution and web search disabled, and user config
+ignored to avoid inheriting MCP tools/hooks. CLI authentication is retained.
+They use only task metadata and up to 20 messages from that thread, have no
+ongoing desktop-chat context, and do not inspect or edit the Unity workspace.
+Enable this mode only on a Hub whose senders you trust: each new root question
+can consume your local Codex quota. Ordinary task execution still follows the
+existing isolated-workspace pipeline.
+
+Offline validation after `pnpm install`:
+
+```bash
+pnpm build
+pnpm test
+node --test tests/message-listener.test.mjs
+```
+
+Tests use fake CLI subprocesses and a local Hub; they do not call a model or
+send messages to the production Hub.
+
 ---
 
 ## Open Source Credits & Standards
