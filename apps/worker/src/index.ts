@@ -7,6 +7,10 @@ function parseArgs(): WorkerConfig {
   let agentType: "grok" | "codex" = "grok";
   let workspaceDir = process.env.WORKSPACE_DIR || process.cwd();
   let token = process.env.HUB_TOKEN;
+  let listenMessages = false;
+  let messagesOnly = false;
+  let messageStateDir: string | undefined;
+  let workerId: string | undefined;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--type" && args[i + 1]) agentType = args[++i] as any;
@@ -14,9 +18,13 @@ function parseArgs(): WorkerConfig {
     if (args[i] === "--project" && args[i + 1]) projectId = args[++i];
     if (args[i] === "--workspace" && args[i + 1]) workspaceDir = args[++i];
     if (args[i] === "--token" && args[i + 1]) token = args[++i];
+    if (args[i] === "--listen-messages") listenMessages = true;
+    if (args[i] === "--messages-only") { messagesOnly = true; listenMessages = true; }
+    if (args[i] === "--message-state-dir" && args[i + 1]) messageStateDir = args[++i];
+    if (args[i] === "--worker-id" && args[i + 1]) workerId = args[++i];
   }
 
-  return { hubUrl, projectId, agentType, workspaceDir, token };
+  return { hubUrl, projectId, agentType, workspaceDir, token, workerId, listenMessages, messagesOnly, messageStateDir };
 }
 
 async function main() {
