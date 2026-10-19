@@ -7,6 +7,9 @@ import {
   A2AEnvelope,
   Task,
   Run,
+  Event,
+  Message,
+  SendMessageInput,
 } from "@ai-collab/contracts";
 
 export class HubClient {
@@ -30,6 +33,7 @@ export class HubClient {
     const res = await fetch(`${this.baseUrl}${path}`, {
       ...options,
       headers,
+      signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(20000)]) : AbortSignal.timeout(20000),
     });
 
     if (!res.ok) {
@@ -84,5 +88,21 @@ export class HubClient {
       method: "POST",
       body: JSON.stringify(envelope),
     });
+  }
+
+  async listEvents(projectId: string, after: number, signal?: AbortSignal): Promise<Event[]> {
+    return this.request(`/api/events?projectId=${encodeURIComponent(projectId)}&after=${after}`, { signal });
+  }
+
+  async listMessages(taskId: string, threadId: string): Promise<Message[]> {
+    return this.request(`/api/tasks/${encodeURIComponent(taskId)}/messages?threadId=${encodeURIComponent(threadId)}`);
+  }
+
+  async getTask(taskId: string): Promise<Task> {
+    return this.request(`/api/tasks/${encodeURIComponent(taskId)}`);
+  }
+
+  async sendMessage(input: SendMessageInput): Promise<unknown> {
+    return this.request('/api/messages', { method: 'POST', body: JSON.stringify(input) });
   }
 }
