@@ -7,9 +7,28 @@ const SCRYPT_R = 8;
 const SCRYPT_P = 1;
 const KEY_LEN = 32;
 
+let ephemeralSecret: Buffer | null = null;
+
 function sessionSecret(): Buffer {
-  const secret = process.env.HUB_SESSION_SECRET || "dev-only-session-secret-placeholder";
-  return Buffer.from(secret);
+  const configured = process.env.HUB_SESSION_SECRET?.trim();
+  if (configured) {
+    if (process.env.NODE_ENV === "production" && configured.length < 32) {
+      throw new Error("HUB_SESSION_SECRET 至少需要 32 个字符");
+    }
+    return Buffer.from(configured);
+  }
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("生产环境必须配置 HUB_SESSION_SECRET（至少 32 个字符）");
+  }
+  if (!ephemeralSecret) {
+    ephemeralSecret = randomBytes(32);
+    console.warn("[auth] 未配置 HUB_SESSION_SECRET，已生成进程级临时密钥；重启后会话失效。");
+  }
+  return ephemeralSecret;
+}
+
+export function assertSessionSecret(): void {
+  if (process.env.NODE_ENV === "production") sessionSecret();
 }
 
 export function hashPassword(password: string, salt = randomBytes(16)): string {

@@ -1,9 +1,11 @@
 import { buildServer } from "./server.js";
+import { assertSessionSecret } from "./auth.js";
 
 const port = Number(process.env.PORT) || 3100;
 const host = process.env.HOST || "0.0.0.0";
 
 async function main() {
+  assertSessionSecret();
   const app = await buildServer();
   try {
     await app.listen({ port, host });
