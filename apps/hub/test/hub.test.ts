@@ -347,3 +347,47 @@ test("SSE 事件流使用默认 message 事件并携带游标", async () => {
     await app.close();
   }
 });
+
+test("指定派给：只有目标 Agent 能领取任务", async () => {
+  const storage = new MemoryStorageEngine();
+  await storage.createProject({ id: "p_assign", name: "Assign", uvcsRepo: "r", baseBranch: "/main", createdAt: new Date().toISOString() });
+  const makeTask = (id: string, agent: string) => storage.createTask({
+    id,
+    projectId: "p_assign",
+    parentTaskId: null,
+    title: `任务 ${id}`,
+    goal: "g",
+    acceptanceCriteria: "a",
+    assignedAgent: agent,
+    state: "queued",
+    budget: { maxMinutes: 10, maxRepairs: 3, maxQuestions: 3 },
+    currentAttempt: 0,
+    version: 1,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+
+  await makeTask("t_for_grok_a", "grok-a");
+  await makeTask("t_for_codex_b", "codex-b");
+
+  // codex-b 只能拿到派给自己的任务
+  const first = await storage.claimAvailableTask("w_codex_b", "p_assign", "codex-b", 60);
+  assert.equal(first?.task.id, "t_for_codex_b");
+
+  // codex-b 再次领取应为空（grok-a 的任务不可越过）
+  const blocked = await storage.claimAvailableTask("w_codex_b", "p_assign", "codex-b", 60);
+  assert.equal(blocked, null);
+
+  // grok-a 才能领到自己那条
+  const second = await storage.claimAvailableTask("w_grok_a", "p_assign", "grok-a", 60);
+  assert.equal(second?.task.id, "t_for_grok_a");
+});
+
+test("AgentId 允许任意 slug 并拒绝非法字符", async () => {
+  const { AgentId } = await import("@ai-collab/contracts");
+  assert.equal(AgentId.parse("grok-a"), "grok-a");
+  assert.equal(AgentId.parse("claude-c"), "claude-c");
+  assert.equal(AgentId.parse("team:reviewer"), "team:reviewer");
+  assert.throws(() => AgentId.parse("bad agent id"));
+  assert.throws(() => AgentId.parse(""));
+});

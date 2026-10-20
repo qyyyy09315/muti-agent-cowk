@@ -53,6 +53,11 @@
 
     .container { max-width: 1360px; margin: 24px auto; padding: 0 24px; }
     .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 24px; }
+    .agent-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+    .agent-card { border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; background: rgba(255,255,255,0.6); }
+    .agent-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 6px; }
+    .agent-name { font-weight: 700; font-size: 0.92rem; display: flex; align-items: center; gap: 6px; }
+    .agent-meta { font-size: 0.78rem; color: var(--muted); line-height: 1.5; }
 
     .card {
       background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
@@ -75,6 +80,7 @@
     .tag-agent { font-size: 0.75rem; font-weight: 700; padding: 2px 6px; border-radius: 4px; }
     .tag-grok { background: #e0f2fe; color: #0369a1; border: 1px solid #bae6fd; }
     .tag-codex { background: #dcfce7; color: #15803d; border: 1px solid #bbf7d0; }
+    .tag-other { background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; }
 
     table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
     th { text-align: left; padding: 10px 12px; color: var(--muted); border-bottom: 1px solid var(--line); font-weight: 600; }
@@ -121,6 +127,7 @@
     }
     .msg-from-grok { background: var(--grok-bubble); border-left: 4px solid #0284c7; }
     .msg-from-codex { background: var(--codex-bubble); border-left: 4px solid #16a34a; }
+    .msg-from-other { background: rgba(255,255,255,0.72); border-left: 4px solid #94a3b8; }
     .msg-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
     .msg-route { font-weight: 700; font-size: 0.8rem; display: flex; align-items: center; gap: 6px; }
     .msg-time { font-size: 0.75rem; color: var(--muted); }
@@ -191,22 +198,14 @@
   <main class="container">
     <div id="approvals-container"></div>
 
-    <!-- 双端 Worker 状态卡片 -->
-    <div class="grid-2">
-      <div class="card" id="worker-grok-card">
-        <div class="card-title">
-          <span><span class="status-dot dot-offline" id="grok-dot"></span>Grok Build 终端 (端 A)</span>
-          <span class="pill pill-queued" id="grok-status-pill">OFFLINE</span>
-        </div>
-        <p style="font-size: 0.85rem; color: var(--muted);" id="grok-desc">等待连接心跳...</p>
+    <!-- Agent 状态看板（按注册的 Agent 数量动态渲染） -->
+    <div class="card" style="margin-bottom: 24px;">
+      <div class="card-title">
+        <span>Agent 在线状态</span>
+        <span id="agent-count" style="font-size: 0.78rem; color: var(--muted);">0 个 Agent</span>
       </div>
-
-      <div class="card" id="worker-codex-card">
-        <div class="card-title">
-          <span><span class="status-dot dot-offline" id="codex-dot"></span>Codex 终端 (端 B)</span>
-          <span class="pill pill-queued" id="codex-status-pill">OFFLINE</span>
-        </div>
-        <p style="font-size: 0.85rem; color: var(--muted);" id="codex-desc">等待连接心跳...</p>
+      <div id="agent-grid" class="agent-grid">
+        <p style="font-size: 0.85rem; color: var(--muted); margin: 8px 0;">正在读取 Agent 列表...</p>
       </div>
     </div>
 
@@ -287,12 +286,12 @@
         <textarea class="form-textarea" id="task-criteria" placeholder="例如：编译无报错，0 孤儿 meta，通过自动化测试..."></textarea>
       </div>
       <div class="form-group">
-        <label class="form-label">指定执行 AI</label>
-        <select class="form-select" id="task-agent">
-          <option value="grok">Grok Build (端 A)</option>
-          <option value="codex">Codex (端 B)</option>
-          <option value="unassigned">自动抢单 (任意先空闲端)</option>
-        </select>
+        <label class="form-label">指定派给 Agent</label>
+        <input class="form-input" id="task-agent" list="agent-options" placeholder="输入 Agent 标识，例如 grok-a" />
+        <datalist id="agent-options"></datalist>
+        <p style="font-size: 0.75rem; color: var(--muted); margin-top: 6px;">
+          只有该 Agent 的 Worker 会领取此任务。留空或填 <code>unassigned</code> 表示兼容旧模式（任意 Agent 可领取）。
+        </p>
       </div>
       <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px;">
         <button class="btn btn-ghost" onclick="closeNewTaskModal()">取消</button>
@@ -402,7 +401,14 @@
       initSse();
     }
 
-    function openNewTaskModal() { document.getElementById("task-modal").style.display = "flex"; }
+    function openNewTaskModal() {
+      const input = document.getElementById("task-agent");
+      const options = document.querySelectorAll("#agent-options option");
+      if (input && !input.value && options.length > 0) {
+        input.value = options[0].value;
+      }
+      document.getElementById("task-modal").style.display = "flex";
+    }
     function closeNewTaskModal() { document.getElementById("task-modal").style.display = "none"; }
 
     async function submitNewTask() {
@@ -435,28 +441,64 @@
         const res = await fetch("/api/workers");
         const workers = await res.json();
         (workers || []).forEach(w => workerIndex.set(w.id, w));
-        updateWorkerUI("grok", workers.find(w => w.agentType === "grok"));
-        updateWorkerUI("codex", workers.find(w => w.agentType === "codex"));
+        renderAgents(workers);
       } catch(e) {}
     }
 
-    function updateWorkerUI(type, worker) {
-      const dot = document.getElementById(`${type}-dot`);
-      const pill = document.getElementById(`${type}-status-pill`);
-      const desc = document.getElementById(`${type}-desc`);
+    // 按 Agent 聚合 Worker（同一 Agent 可有多个 Worker）
+    function renderAgents(workers) {
+      const grid = document.getElementById("agent-grid");
+      const count = document.getElementById("agent-count");
+      if (!grid) return;
 
-      if (!worker) {
-        dot.className = "status-dot dot-offline";
-        pill.className = "pill pill-queued";
-        pill.innerText = "OFFLINE";
-        desc.innerText = "未注册或尚未连接";
+      const known = new Set((workers || []).map(w => w.agentType).filter(Boolean));
+      if (count) count.textContent = `${known.size} 个 Agent`;
+
+      if (!workers || workers.length === 0) {
+        grid.innerHTML = `<p style="font-size: 0.85rem; color: var(--muted); margin: 8px 0;">暂无 Agent 注册。启动 Worker 时使用 <code>--agent &lt;标识&gt;</code> 接入。</p>`;
         return;
       }
-      const isOnline = worker.status === "online" || worker.status === "busy";
-      dot.className = isOnline ? "status-dot dot-online" : "status-dot dot-offline";
-      pill.className = isOnline ? "pill pill-completed" : "pill pill-queued";
-      pill.innerText = isOnline ? "ONLINE" : "OFFLINE";
-      desc.innerText = `${worker.hostname} · 最近心跳: ${new Date(worker.lastHeartbeatAt).toLocaleTimeString()}`;
+
+      const groups = new Map();
+      for (const w of workers) {
+        const key = w.agentType || "unknown";
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(w);
+      }
+
+      grid.innerHTML = Array.from(groups.entries()).map(([agentId, list]) => {
+        const online = list.filter(w => w.status === "online" || w.status === "busy");
+        const isOnline = online.length > 0;
+        const hosts = list.map(w => w.hostname).filter(Boolean).join("、");
+        const last = list
+          .map(w => new Date(w.lastHeartbeatAt).getTime())
+          .filter(n => !Number.isNaN(n))
+          .sort((a, b) => b - a)[0];
+        return `
+          <div class="agent-card">
+            <div class="agent-head">
+              <span class="agent-name">
+                <span class="status-dot ${isOnline ? 'dot-online' : 'dot-offline'}"></span>
+                ${escapeHtml(agentId)}
+              </span>
+              <span class="pill ${isOnline ? 'pill-completed' : 'pill-queued'}">${isOnline ? "ONLINE" : "OFFLINE"}</span>
+            </div>
+            <div class="agent-meta">
+              ${online.length} / ${list.length} 个 Worker 在线<br>
+              ${escapeHtml(hosts || "未知主机")}${last ? ` · 心跳 ${new Date(last).toLocaleTimeString()}` : ""}
+            </div>
+          </div>
+        `;
+      }).join("");
+
+      // 同步刷新派单候选
+      renderAgentOptions(Array.from(groups.keys()));
+    }
+
+    function renderAgentOptions(agentIds) {
+      const list = document.getElementById("agent-options");
+      if (!list) return;
+      list.innerHTML = agentIds.map(id => `<option value="${escapeHtml(id)}"></option>`).join("");
     }
 
     // 2. 任务列表查询渲染（支持全部或特定项目）
@@ -553,14 +595,15 @@
         const prevCount = renderedMessageCount;
 
         container.innerHTML = messages.map(m => {
-          const isGrok = m.fromAgent === "grok";
+          const agentClass = (id) => ["grok", "codex"].includes(id) ? `tag-${id}` : "tag-other";
+          const bubbleClass = m.fromAgent === "grok" ? "msg-from-grok" : m.fromAgent === "codex" ? "msg-from-codex" : "msg-from-other";
           return `
-            <div class="msg-item ${isGrok ? 'msg-from-grok' : 'msg-from-codex'}">
+            <div class="msg-item ${bubbleClass}">
               <div class="msg-header">
                 <span class="msg-route">
-                  <span class="tag-agent tag-${m.fromAgent}">${m.fromAgent.toUpperCase()}</span>
+                  <span class="tag-agent ${agentClass(m.fromAgent)}">${escapeHtml(m.fromAgent)}</span>
                   ➔
-                  <span class="tag-agent tag-${m.toAgent}">${m.toAgent.toUpperCase()}</span>
+                  <span class="tag-agent ${agentClass(m.toAgent)}">${escapeHtml(m.toAgent)}</span>
                   ${m.replyToId ? '<span style="font-size: 0.72rem; color: #64748b; font-weight: normal;">(答复引用)</span>' : ''}
                 </span>
                 <span class="msg-time">${new Date(m.createdAt).toLocaleTimeString()}</span>
@@ -654,9 +697,7 @@
     }
 
     function agentLabel(agent) {
-      if (agent === "grok") return "Grok";
-      if (agent === "codex") return "Codex";
-      if (agent === "unassigned") return "自动分配";
+      if (agent === "unassigned") return "未指定（任意 Agent）";
       return agent || "未知";
     }
 

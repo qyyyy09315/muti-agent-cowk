@@ -153,7 +153,7 @@ export class MemoryStorageEngine implements StorageEngine {
   async claimAvailableTask(
     workerId: string,
     projectId: string,
-    agentType: "grok" | "codex",
+    agentId: string,
     leaseSeconds: number
   ): Promise<{ task: Task; run: Run } | null> {
     // 寻找处于 QUEUED 且符合 assignedAgent 的任务
@@ -161,7 +161,7 @@ export class MemoryStorageEngine implements StorageEngine {
       (t) =>
         t.projectId === projectId &&
         t.state === TaskState.QUEUED &&
-        (t.assignedAgent === agentType || t.assignedAgent === "unassigned")
+        (t.assignedAgent === agentId || t.assignedAgent === "unassigned")
     );
 
     if (!candidate) return null;
@@ -665,7 +665,7 @@ export class PostgresStorageEngine implements StorageEngine {
   async claimAvailableTask(
     workerId: string,
     projectId: string,
-    agentType: "grok" | "codex",
+    agentId: string,
     leaseSeconds: number
   ): Promise<{ task: Task; run: Run } | null> {
     const client = await this.pool.connect();
@@ -681,7 +681,7 @@ export class PostgresStorageEngine implements StorageEngine {
          ORDER BY created_at ASC
          LIMIT 1
          FOR UPDATE SKIP LOCKED`,
-        [projectId, agentType]
+        [projectId, agentId]
       );
 
       if (!selectRes.rows[0]) {

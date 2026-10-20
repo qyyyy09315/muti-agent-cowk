@@ -13,6 +13,9 @@ function parseArgs(): WorkerConfig {
   let workerId: string | undefined;
 
   for (let i = 0; i < args.length; i++) {
+    // --agent 为推荐写法：本 Worker 所代表的 Agent 标识（任务由调度方指定派给该 Agent）
+    if (args[i] === "--agent" && args[i + 1]) agentType = args[++i] as any;
+    // --type 保留为兼容别名，含义与 --agent 相同
     if (args[i] === "--type" && args[i + 1]) agentType = args[++i] as any;
     if (args[i] === "--hub" && args[i + 1]) hubUrl = args[++i];
     if (args[i] === "--project" && args[i + 1]) projectId = args[++i];

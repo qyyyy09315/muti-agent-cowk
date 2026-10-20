@@ -1,8 +1,17 @@
 import { z } from "zod";
 import { TaskState } from "./state-machine.js";
 
-export const AgentType = z.enum(["grok", "codex", "human"]);
-export type AgentTypeValue = z.infer<typeof AgentType>;
+/** Agent 标识：任意可读 slug（如 grok-a / codex-b / claude-c），保留 grok/codex/human 兼容旧值 */
+export const AgentId = z
+  .string()
+  .trim()
+  .min(1)
+  .max(64)
+  .regex(/^[A-Za-z0-9._:-]+$/, "Agent 标识只能包含字母、数字、点、下划线、冒号与短横线");
+
+/** @deprecated 使用 AgentId；保留导出以兼容旧调用方 */
+export const AgentType = AgentId;
+export type AgentTypeValue = z.infer<typeof AgentId>;
 
 export const WorkerStatus = z.enum(["online", "offline", "busy"]);
 export type WorkerStatusValue = z.infer<typeof WorkerStatus>;
@@ -24,7 +33,7 @@ export type Project = z.infer<typeof ProjectSchema>;
 
 export const WorkerSchema = z.object({
   id: z.string().min(1),
-  agentType: AgentType,
+  agentType: AgentId,
   name: z.string().min(1),
   hostname: z.string().min(1),
   capabilities: z.array(z.string()).default([]),
@@ -48,7 +57,7 @@ export const TaskSchema = z.object({
   title: z.string().min(1).max(200),
   goal: z.string().min(1),
   acceptanceCriteria: z.string().min(1),
-  assignedAgent: z.enum(["grok", "codex", "unassigned"]).default("unassigned"),
+  assignedAgent: AgentId.default("unassigned"),
   state: z.nativeEnum(TaskState).default(TaskState.QUEUED),
   budget: TaskBudgetSchema.default({}),
   currentAttempt: z.number().int().nonnegative().default(0),
@@ -78,8 +87,8 @@ export const MessageSchema = z.object({
   projectId: z.string().min(1),
   taskId: z.string().min(1),
   threadId: z.string().min(1),
-  fromAgent: AgentType,
-  toAgent: AgentType,
+  fromAgent: AgentId,
+  toAgent: AgentId,
   content: z.string().min(1),
   replyToId: z.string().nullable().default(null),
   idempotencyKey: z.string().min(1),
@@ -108,7 +117,7 @@ export const ApprovalSchema = z.object({
   description: z.string().min(1),
   details: z.record(z.string(), z.unknown()).default({}),
   status: ApprovalStatus.default("pending"),
-  requestedBy: AgentType,
+  requestedBy: AgentId,
   decidedBy: z.string().nullable().default(null),
   decidedAt: z.string().datetime().nullable().default(null),
   expiresAt: z.string().datetime(),
@@ -133,7 +142,7 @@ export type Artifact = z.infer<typeof ArtifactSchema>;
 
 export const RegisterWorkerInputSchema = z.object({
   id: z.string().min(1),
-  agentType: AgentType,
+  agentType: AgentId,
   name: z.string().min(1),
   hostname: z.string().min(1),
   capabilities: z.array(z.string()).default([]),
@@ -153,7 +162,7 @@ export const CreateTaskInputSchema = z.object({
   title: z.string().min(1).max(200),
   goal: z.string().min(1),
   acceptanceCriteria: z.string().min(1),
-  assignedAgent: z.enum(["grok", "codex", "unassigned"]).default("unassigned"),
+  assignedAgent: AgentId.default("unassigned"),
   budget: TaskBudgetSchema.partial().optional(),
 });
 export type CreateTaskInput = z.infer<typeof CreateTaskInputSchema>;
@@ -161,7 +170,7 @@ export type CreateTaskInput = z.infer<typeof CreateTaskInputSchema>;
 export const ClaimRunInputSchema = z.object({
   workerId: z.string().min(1),
   projectId: z.string().min(1),
-  agentType: z.enum(["grok", "codex"]),
+  agentType: AgentId,
   timeoutSeconds: z.number().int().min(1).max(30).default(15), // 长轮询等待时间
 });
 export type ClaimRunInput = z.infer<typeof ClaimRunInputSchema>;
@@ -196,8 +205,8 @@ export const SendMessageInputSchema = z.object({
   projectId: z.string().min(1),
   taskId: z.string().min(1),
   threadId: z.string().min(1),
-  fromAgent: AgentType,
-  toAgent: AgentType,
+  fromAgent: AgentId,
+  toAgent: AgentId,
   content: z.string().min(1),
   replyToId: z.string().nullable().optional(),
   idempotencyKey: z.string().min(1),

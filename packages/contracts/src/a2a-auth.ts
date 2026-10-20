@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { AgentId } from "./schemas.js";
 
 export const A2AIntent = z.enum([
   "clarify_interface",    // 接口与数据结构体对齐提问
@@ -14,8 +15,8 @@ export const A2AEnvelopeSchema = z.object({
   conversationId: z.string().min(1),
   projectId: z.string().min(1),
   taskId: z.string().min(1),
-  fromAgent: z.enum(["grok", "codex"]),
-  toAgent: z.enum(["grok", "codex"]),
+  fromAgent: AgentId,
+  toAgent: AgentId,
   intent: A2AIntent,
   payload: z.record(z.string(), z.unknown()),
   changesetSpec: z.string().optional(),

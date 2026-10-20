@@ -14,7 +14,7 @@ import { StorageEngine } from "./types.js";
 type ClaimWaiter = {
   workerId: string;
   projectId: string;
-  agentType: "grok" | "codex";
+  agentType: string;
   resolve: (result: { task: Task; run: Run } | null) => void;
   timer: NodeJS.Timeout;
 };

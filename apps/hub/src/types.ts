@@ -40,7 +40,7 @@ export interface StorageEngine {
   claimAvailableTask(
     workerId: string,
     projectId: string,
-    agentType: "grok" | "codex",
+    agentId: string,
     leaseSeconds: number
   ): Promise<{ task: Task; run: Run } | null>;
   renewLease(runId: string, workerId: string, fencingToken: number, extendSeconds: number): Promise<Run>;
