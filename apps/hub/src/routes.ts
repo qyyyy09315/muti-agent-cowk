@@ -142,6 +142,13 @@ export function registerRoutes(app: FastifyInstance, storage: StorageEngine, sch
     return task;
   });
 
+  app.get("/api/tasks", async (req: FastifyRequest<{ Querystring: { projectId?: string; state?: string } }>) => {
+    if (req.query.projectId) {
+      return storage.listTasks(req.query.projectId, req.query.state as any);
+    }
+    return storage.listAllTasks(100);
+  });
+
   app.get("/api/projects/:projectId/tasks", async (req: FastifyRequest<{ Params: { projectId: string }; Querystring: { state?: string } }>) => {
     return storage.listTasks(req.params.projectId, req.query.state as any);
   });
@@ -202,6 +209,16 @@ export function registerRoutes(app: FastifyInstance, storage: StorageEngine, sch
 
   app.get("/api/tasks/:id/messages", async (req: FastifyRequest<{ Params: { id: string }; Querystring: { threadId?: string } }>) => {
     return storage.listMessages(req.params.id, req.query.threadId);
+  });
+
+  app.get("/api/projects/:projectId/messages", async (req: FastifyRequest<{ Params: { projectId: string }; Querystring: { limit?: string } }>) => {
+    const limit = req.query.limit ? parseInt(req.query.limit, 10) : 100;
+    return storage.listProjectMessages(req.params.projectId, limit);
+  });
+
+  app.get("/api/messages", async (req: FastifyRequest<{ Querystring: { limit?: string } }>) => {
+    const limit = req.query.limit ? parseInt(req.query.limit, 10) : 100;
+    return storage.listAllMessages(limit);
   });
 
   // 7. 事件流 (SSE 与断点游标)
