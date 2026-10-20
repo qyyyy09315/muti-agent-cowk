@@ -293,3 +293,57 @@ test("Worker 主动调用 failRun 并在超限时触发熔断", async () => {
     await app.close();
   }
 });
+
+test("SSE 事件流使用默认 message 事件并携带游标", async () => {
+  const storage = new MemoryStorageEngine();
+  const app = await buildServer({ storage });
+  await app.listen({ port: 0, host: "127.0.0.1" });
+  const address = app.server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+
+  try {
+    await storage.createProject({ id: "p_sse", name: "SSE", uvcsRepo: "r", baseBranch: "/main", createdAt: new Date().toISOString() });
+    await storage.createTask({
+      id: "t_sse",
+      projectId: "p_sse",
+      parentTaskId: null,
+      title: "SSE 探测任务",
+      goal: "g",
+      acceptanceCriteria: "a",
+      assignedAgent: "codex",
+      state: "queued",
+      budget: { maxMinutes: 10, maxRepairs: 3, maxQuestions: 10 },
+      currentAttempt: 0,
+      version: 1,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4000);
+    const res = await fetch(`http://127.0.0.1:${port}/api/events?projectId=p_sse&stream=1`, { signal: controller.signal });
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") || "", /text\/event-stream/);
+
+    let buffer = "";
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    while (buffer.length < 200) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      if (buffer.includes("\n\n") && buffer.includes("data: ")) break;
+    }
+    clearTimeout(timer);
+    controller.abort();
+    await reader.cancel().catch(() => {});
+
+    // 必须使用默认 message 事件（兼容 EventSource.onmessage），且带 id 与 data
+    assert.match(buffer, /id: \d+/);
+    assert.match(buffer, /data: \{/);
+    assert.doesNotMatch(buffer, /\nevent: /);
+    assert.match(buffer, /"type":"task_created"/);
+  } finally {
+    await app.close();
+  }
+});

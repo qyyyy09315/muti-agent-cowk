@@ -97,7 +97,17 @@
     .log-ev { color: #38bdf8; font-weight: 600; margin-right: 8px; }
 
     /* 消息气泡样式 */
-    .msg-list { max-height: 320px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; padding-right: 6px; }
+    .msg-list { max-height: 320px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; padding-right: 6px; overscroll-behavior: contain; }
+    .msg-wrap { position: relative; }
+    .new-msg-pill {
+      position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%);
+      display: none; align-items: center; gap: 6px; border: 0; cursor: pointer;
+      background: var(--ink); color: #fff; border-radius: 999px;
+      padding: 6px 14px; font-size: 0.78rem; font-weight: 600;
+      box-shadow: 0 6px 16px rgba(36,48,68,0.28); z-index: 5;
+    }
+    .new-msg-pill.show { display: inline-flex; }
+    .new-msg-pill:hover { background: var(--accent); }
     .msg-item {
       padding: 12px 16px; border-radius: 8px; border: 1px solid var(--line);
       font-size: 0.85rem; position: relative;
@@ -226,10 +236,13 @@
       <div class="card">
         <div class="card-title">
           <span>AI 对 AI 协同对话流 (Messages Log)</span>
-          <button class="btn btn-ghost btn-sm" onclick="fetchMessages()">刷新对话</button>
+          <button class="btn btn-ghost btn-sm" onclick="fetchMessages(true)">刷新对话</button>
         </div>
-        <div class="msg-list" id="messages-container">
-          <p style="font-size: 0.85rem; color: var(--muted); text-align: center; margin-top: 40px;">正在载入协同对话记录...</p>
+        <div class="msg-wrap">
+          <div class="msg-list" id="messages-container">
+            <p style="font-size: 0.85rem; color: var(--muted); text-align: center; margin-top: 40px;">正在载入协同对话记录...</p>
+          </div>
+          <button type="button" class="new-msg-pill" id="new-msg-pill" onclick="jumpToLatestMessages()">有新消息</button>
         </div>
       </div>
 
@@ -286,6 +299,9 @@
     let projectsList = [];
     let token = localStorage.getItem("collab_token");
     let sseSource = null;
+    let sseReconnectTimer = null;
+    let lastEventCursor = 0;
+    let sseSeen = new Set();
 
     async function checkAuth() {
       if (!token) {
@@ -366,8 +382,15 @@
 
     function onProjectChange(newId) {
       activeProjectId = newId;
+      // 切项目时重置 SSE 游标与去重集合，清空事件面板
+      lastEventCursor = 0;
+      sseSeen = new Set();
+      const logBox = document.getElementById("event-log");
+      if (logBox) {
+        logBox.innerHTML = `<div class="log-row"><span class="log-time">[System]</span>已切换项目，正在监听事件流...</div>`;
+      }
       fetchTasks();
-      fetchMessages();
+      fetchMessages(true);
       fetchApprovals();
       initSse();
     }
@@ -472,18 +495,52 @@
       fetchTasks();
     }
 
-    // 3. 消息记录流渲染（支持全部项目与特定项目）
-    async function fetchMessages() {
+    // 3. 消息记录流渲染（聊天软件式滚动：仅在底部时自动跟随，上拉阅读时不弹回）
+    let renderedMessageCount = 0;
+    let unseenMessages = 0;
+
+    function isNearBottom(el, threshold = 80) {
+      return el.scrollHeight - el.scrollTop - el.clientHeight <= threshold;
+    }
+
+    function showNewMessagesPill(count) {
+      const pill = document.getElementById("new-msg-pill");
+      if (!pill) return;
+      pill.textContent = count > 0 ? `有 ${count} 条新消息` : "有新消息";
+      pill.classList.add("show");
+    }
+
+    function hideNewMessagesPill() {
+      unseenMessages = 0;
+      const pill = document.getElementById("new-msg-pill");
+      if (pill) pill.classList.remove("show");
+    }
+
+    function jumpToLatestMessages() {
+      const el = document.getElementById("messages-container");
+      if (el) el.scrollTop = el.scrollHeight;
+      hideNewMessagesPill();
+    }
+
+    async function fetchMessages(force = false) {
       try {
         const url = activeProjectId === "__ALL__" ? "/api/messages?limit=50" : `/api/projects/${activeProjectId}/messages?limit=50`;
         const res = await fetch(url);
         const messages = await res.json();
         const container = document.getElementById("messages-container");
+        if (!container) return;
 
         if (!messages || messages.length === 0) {
           container.innerHTML = `<p style="font-size: 0.85rem; color: var(--muted); text-align: center; margin-top: 40px;">当前暂无协同对话记录</p>`;
+          renderedMessageCount = 0;
+          hideNewMessagesPill();
           return;
         }
+
+        // 渲染前判断：用户是否停留在底部（决定是否自动滚动跟随）
+        const stick = force || isNearBottom(container);
+        const prevScrollTop = container.scrollTop;
+        const prevCount = renderedMessageCount;
 
         container.innerHTML = messages.map(m => {
           const isGrok = m.fromAgent === "grok";
@@ -506,8 +563,19 @@
             </div>
           `;
         }).join("");
-        
-        container.scrollTop = container.scrollHeight;
+        renderedMessageCount = messages.length;
+
+        if (stick) {
+          container.scrollTop = container.scrollHeight;
+          hideNewMessagesPill();
+        } else {
+          // 保持用户当前阅读位置，并提示有新消息，而不是强行弹回底部
+          container.scrollTop = prevScrollTop;
+          if (messages.length > prevCount) {
+            unseenMessages += messages.length - prevCount;
+            showNewMessagesPill(unseenMessages);
+          }
+        }
       } catch(e) {}
     }
 
@@ -560,27 +628,80 @@
     }
 
     function initSse() {
+      if (sseReconnectTimer) {
+        clearTimeout(sseReconnectTimer);
+        sseReconnectTimer = null;
+      }
       if (sseSource) {
         sseSource.close();
+        sseSource = null;
       }
-      const sseProject = (activeProjectId && activeProjectId !== "__ALL__") ? activeProjectId : (projectsList[0]?.id || "proj_lanzhou_landmarks");
-      sseSource = new EventSource(`/api/events?projectId=${sseProject}&stream=1`);
-      const logBox = document.getElementById("event-log");
 
-      sseSource.onmessage = (event) => {
-        try {
-          const ev = JSON.parse(event.data);
+      const indicator = document.getElementById("sse-indicator");
+      const sseProject = (activeProjectId && activeProjectId !== "__ALL__") ? activeProjectId : (projectsList[0]?.id || null);
+      if (!sseProject) {
+        if (indicator) {
+          indicator.textContent = "○ 暂无项目可订阅";
+          indicator.style.color = "var(--muted)";
+        }
+        return;
+      }
+
+      const source = new EventSource(`/api/events?projectId=${encodeURIComponent(sseProject)}&stream=1&after=${lastEventCursor}`);
+      sseSource = source;
+
+      source.onopen = () => {
+        if (indicator) {
+          indicator.textContent = "● 实时连接中";
+          indicator.style.color = "var(--success)";
+        }
+      };
+
+      // 服务端只发送默认 message 事件，具体类型在 data.type 中
+      source.onmessage = (event) => {
+        let ev;
+        try { ev = JSON.parse(event.data); } catch { return; }
+
+        const id = Number(ev.id);
+        if (Number.isFinite(id)) {
+          if (sseSeen.has(id)) return; // 断线重连后的重复事件去重
+          sseSeen.add(id);
+          if (sseSeen.size > 2000) {
+            sseSeen = new Set(Array.from(sseSeen).slice(-1000));
+          }
+          if (id > lastEventCursor) lastEventCursor = id;
+        }
+
+        const logBox = document.getElementById("event-log");
+        if (logBox) {
           const row = document.createElement("div");
           row.className = "log-row";
           row.innerHTML = `<span class="log-time">[${new Date(ev.createdAt).toLocaleTimeString()}]</span><span class="log-ev">#${ev.id} ${ev.type}</span>${escapeHtml(JSON.stringify(ev.payload))}`;
           logBox.appendChild(row);
-          logBox.scrollTop = logBox.scrollHeight;
+          while (logBox.childElementCount > 200) logBox.removeChild(logBox.firstElementChild);
+          const atBottom = isNearBottom(logBox);
+          if (atBottom) logBox.scrollTop = logBox.scrollHeight;
+        }
 
-          // 核心联动：事件触发时实时刷新流水线与对话流
-          if (ev.type.includes("task") || ev.type.includes("run")) fetchTasks();
-          if (ev.type.includes("message")) fetchMessages();
-          if (ev.type.includes("approval")) fetchApprovals();
-        } catch(e) {}
+        // 核心联动：事件触发时实时刷新流水线与对话流
+        if (ev.type && ev.type.includes("message")) fetchMessages();
+        if (ev.type && (ev.type.includes("task") || ev.type.includes("run"))) fetchTasks();
+        if (ev.type && ev.type.includes("approval")) fetchApprovals();
+      };
+
+      source.onerror = () => {
+        if (indicator) {
+          indicator.textContent = "○ 连接中断，3 秒后重连";
+          indicator.style.color = "var(--warning)";
+        }
+        source.close();
+        if (sseSource === source) {
+          sseSource = null;
+          sseReconnectTimer = setTimeout(() => {
+            sseReconnectTimer = null;
+            initSse();
+          }, 3000);
+        }
       };
     }
 
@@ -591,9 +712,18 @@
 
     async function initApp() {
       await loadProjects();
+
+      // 用户手动滚回底部时，收起"有新消息"提示
+      const msgEl = document.getElementById("messages-container");
+      if (msgEl) {
+        msgEl.addEventListener("scroll", () => {
+          if (isNearBottom(msgEl)) hideNewMessagesPill();
+        });
+      }
+
       fetchWorkers();
       fetchTasks();
-      fetchMessages();
+      fetchMessages(true);
       fetchApprovals();
       initSse();
 

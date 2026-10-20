@@ -237,26 +237,62 @@ export function registerRoutes(app: FastifyInstance, storage: StorageEngine, sch
 
     // SSE 流式推送模式
     if (stream === "true" || stream === "1") {
-      reply.raw.setHeader("Content-Type", "text/event-stream");
-      reply.raw.setHeader("Cache-Control", "no-cache");
-      reply.raw.setHeader("Connection", "keep-alive");
-      reply.raw.flushHeaders();
+      // 必须由应用接管原生响应流，否则 Fastify 会提前结束连接
+      reply.hijack();
+      reply.raw.writeHead(200, {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+      });
+      // 断线重连间隔提示
+      reply.raw.write("retry: 3000\n\n");
 
       let currentCursor = afterCursor;
+      let closed = false;
+
+      const write = (chunk: string): boolean => {
+        if (closed) return false;
+        try {
+          reply.raw.write(chunk);
+          return true;
+        } catch {
+          closed = true;
+          return false;
+        }
+      };
 
       const interval = setInterval(async () => {
+        if (closed) return;
         try {
           const events = await storage.listEvents(projectId, currentCursor, 50);
+          // 只使用默认 message 事件（不写 event: 名称），便于浏览器 EventSource.onmessage 统一接收；
+          // 具体类型保留在 data 负载的 type 字段中。
           for (const ev of events) {
-            reply.raw.write(`id: ${ev.id}\nevent: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`);
+            if (!write(`id: ${ev.id}\ndata: ${JSON.stringify(ev)}\n\n`)) break;
             currentCursor = ev.id;
           }
-        } catch (e) {
+        } catch {
+          closed = true;
           clearInterval(interval);
         }
       }, 1000);
 
-      req.raw.on("close", () => clearInterval(interval));
+      // 保活注释，防止中间代理按空闲超时断开
+      const keepalive = setInterval(() => {
+        if (!write(": ping\n\n")) clearInterval(keepalive);
+      }, 15000);
+
+      const cleanup = () => {
+        closed = true;
+        clearInterval(interval);
+        clearInterval(keepalive);
+        try {
+          reply.raw.end();
+        } catch {}
+      };
+      req.raw.on("close", cleanup);
+      req.raw.on("error", cleanup);
       return;
     }
 
