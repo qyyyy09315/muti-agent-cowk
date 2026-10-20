@@ -184,6 +184,14 @@ export const SubmitRunInputSchema = z.object({
 });
 export type SubmitRunInput = z.infer<typeof SubmitRunInputSchema>;
 
+export const FailRunInputSchema = z.object({
+  runId: z.string().min(1),
+  workerId: z.string().min(1),
+  fencingToken: z.number().int().positive(),
+  reason: z.string().min(1),
+});
+export type FailRunInput = z.infer<typeof FailRunInputSchema>;
+
 export const SendMessageInputSchema = z.object({
   projectId: z.string().min(1),
   taskId: z.string().min(1),

@@ -45,6 +45,7 @@ export interface StorageEngine {
   ): Promise<{ task: Task; run: Run } | null>;
   renewLease(runId: string, workerId: string, fencingToken: number, extendSeconds: number): Promise<Run>;
   submitRun(runId: string, workerId: string, fencingToken: number, summary: string): Promise<Run>;
+  failRun(runId: string, workerId: string, fencingToken: number, reason: string): Promise<Run>;
   reapExpiredLeases(): Promise<number>;
 
   // Messages

@@ -245,3 +245,51 @@ test("执行端提问后任务等待对端，答复后重新排队", async () =>
     await app.close();
   }
 });
+
+test("Worker 主动调用 failRun 并在超限时触发熔断", async () => {
+  const storage = new MemoryStorageEngine();
+  const app = await buildServer({ storage });
+  await app.ready();
+  try {
+    await storage.createProject({ id: "p1", name: "P1", uvcsRepo: "r", baseBranch: "/main", createdAt: new Date().toISOString() });
+    const task = await storage.createTask({
+      id: "t_fail",
+      projectId: "p1",
+      parentTaskId: null,
+      title: "失败熔断测试",
+      goal: "g",
+      acceptanceCriteria: "a",
+      assignedAgent: "codex",
+      state: "queued",
+      budget: { maxMinutes: 10, maxRepairs: 1, maxQuestions: 2 },
+      currentAttempt: 0,
+      version: 1,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    // 第一次领单
+    const claim1 = await storage.claimAvailableTask("w1", "p1", "codex", 60);
+    assert.ok(claim1);
+    assert.equal(claim1.task.currentAttempt, 1);
+
+    // 主动上报失败（达到 maxRepairs: 1）
+    const failRes = await app.inject({
+      method: "POST",
+      url: `/api/runs/${claim1.run.id}/fail`,
+      payload: {
+        runId: claim1.run.id,
+        workerId: "w1",
+        fencingToken: claim1.run.fencingToken,
+        reason: "Unity 质量门禁拦截",
+      },
+    });
+    assert.equal(failRes.statusCode, 200);
+
+    // 验证任务被彻底熔断为 failed，而不是继续无限 queued
+    const taskAfter = await storage.getTask(task.id);
+    assert.equal(taskAfter?.state, "failed");
+  } finally {
+    await app.close();
+  }
+});

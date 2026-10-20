@@ -243,6 +243,48 @@ export class MemoryStorageEngine implements StorageEngine {
     return run;
   }
 
+  async failRun(runId: string, workerId: string, fencingToken: number, reason: string): Promise<Run> {
+    const run = this.runs.get(runId);
+    if (!run) throw new CollabError(ErrorCode.TASK_NOT_FOUND, "执行运行实例不存在", 404);
+    if (run.workerId !== workerId || run.fencingToken !== fencingToken) {
+      throw new CollabError(ErrorCode.FORBIDDEN, "Fencing Token 失效，拒绝回写结果", 403);
+    }
+
+    run.status = "failed";
+    run.endedAt = new Date().toISOString();
+    run.exitReason = reason;
+
+    const task = this.tasks.get(run.taskId);
+    if (task && (task.state === TaskState.LEASED || task.state === TaskState.RUNNING)) {
+      const maxRepairs = task.budget.maxRepairs ?? 3;
+      if (task.currentAttempt < maxRepairs) {
+        task.state = TaskState.QUEUED;
+        task.updatedAt = new Date().toISOString();
+        task.version += 1;
+        await this.emitEvent(task.projectId, "task_run_failed", {
+          taskId: task.id,
+          runId: run.id,
+          requeued: true,
+          reason,
+          attempt: task.currentAttempt,
+          maxRepairs,
+        }, task.id, run.id);
+      } else {
+        task.state = TaskState.FAILED;
+        task.updatedAt = new Date().toISOString();
+        task.version += 1;
+        await this.emitEvent(task.projectId, "task_run_failed", {
+          taskId: task.id,
+          runId: run.id,
+          requeued: false,
+          reason: `重试已达上限 (${task.currentAttempt}/${maxRepairs})。最后错误: ${reason}`,
+        }, task.id, run.id);
+      }
+    }
+
+    return run;
+  }
+
   async reapExpiredLeases(): Promise<number> {
     const now = Date.now();
     let reaped = 0;
@@ -774,17 +816,121 @@ export class PostgresStorageEngine implements StorageEngine {
     }
   }
 
+  async failRun(runId: string, workerId: string, fencingToken: number, reason: string): Promise<Run> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const runRes = await client.query(
+        `UPDATE runs SET status = 'failed', ended_at = NOW(), exit_reason = $4
+         WHERE id = $1 AND worker_id = $2 AND fencing_token = $3 RETURNING *`,
+        [runId, workerId, fencingToken, reason]
+      );
+      if (!runRes.rows[0]) throw new CollabError(ErrorCode.FORBIDDEN, "Fencing Token 失效，拒绝回写", 403);
+
+      const r = runRes.rows[0];
+      const taskRes = await client.query(
+        `SELECT id, current_attempt, budget, project_id, state FROM tasks WHERE id = $1 FOR UPDATE`,
+        [r.task_id]
+      );
+
+      if (taskRes.rows[0]) {
+        const t = taskRes.rows[0];
+        const maxRepairs = Number(t.budget?.maxRepairs ?? 3);
+        if (t.current_attempt < maxRepairs) {
+          // 未超上限，重置为 queued
+          await client.query(
+            `UPDATE tasks SET state = 'queued', version = version + 1, updated_at = NOW() WHERE id = $1`,
+            [t.id]
+          );
+          await this.emitEvent(t.project_id, "task_run_failed", {
+            taskId: t.id,
+            runId: r.id,
+            requeued: true,
+            reason,
+            attempt: t.current_attempt,
+            maxRepairs,
+          }, t.id, r.id);
+        } else {
+          // 达到上限，彻底熔断为 failed！
+          await client.query(
+            `UPDATE tasks SET state = 'failed', version = version + 1, updated_at = NOW() WHERE id = $1`,
+            [t.id]
+          );
+          await this.emitEvent(t.project_id, "task_run_failed", {
+            taskId: t.id,
+            runId: r.id,
+            requeued: false,
+            reason: `已达最大重试上限 (${t.current_attempt}/${maxRepairs})。最后错误: ${reason}`,
+          }, t.id, r.id);
+        }
+      }
+
+      await client.query("COMMIT");
+
+      return {
+        id: r.id,
+        taskId: r.task_id,
+        projectId: r.project_id,
+        workerId: r.worker_id,
+        fencingToken: Number(r.fencing_token),
+        attempt: r.attempt,
+        leaseExpiresAt: r.lease_expires_at.toISOString(),
+        status: r.status,
+        startedAt: r.started_at.toISOString(),
+        endedAt: r.ended_at.toISOString(),
+        exitReason: r.exit_reason,
+      };
+    } catch (e) {
+      await client.query("ROLLBACK");
+      throw e;
+    } finally {
+      client.release();
+    }
+  }
+
   async reapExpiredLeases(): Promise<number> {
     const res = await this.pool.query(
       `UPDATE runs SET status = 'failed', ended_at = NOW(), exit_reason = '租约心跳超时'
        WHERE status = 'running' AND lease_expires_at < NOW() RETURNING *`
     );
     for (const r of res.rows) {
-      await this.pool.query(
-        `UPDATE tasks SET state = 'queued', version = version + 1, updated_at = NOW()
-         WHERE id = $1 AND state IN ('leased', 'running')`,
+      const taskRes = await this.pool.query(
+        `SELECT id, current_attempt, budget, state, project_id FROM tasks WHERE id = $1`,
         [r.task_id]
       );
+      if (taskRes.rows[0]) {
+        const t = taskRes.rows[0];
+        if (t.state === 'leased' || t.state === 'running') {
+          const maxRepairs = Number(t.budget?.maxRepairs ?? 3);
+          if (t.current_attempt < maxRepairs) {
+            await this.pool.query(
+              `UPDATE tasks SET state = 'queued', version = version + 1, updated_at = NOW()
+               WHERE id = $1`,
+              [t.id]
+            );
+            await this.emitEvent(t.project_id, "task_lease_reaped", {
+              taskId: t.id,
+              runId: r.id,
+              requeued: true,
+              attempt: t.current_attempt,
+              maxRepairs,
+            }, t.id, r.id);
+          } else {
+            // 达到上限熔断
+            await this.pool.query(
+              `UPDATE tasks SET state = 'failed', version = version + 1, updated_at = NOW()
+               WHERE id = $1`,
+              [t.id]
+            );
+            await this.emitEvent(t.project_id, "task_lease_reaped", {
+              taskId: t.id,
+              runId: r.id,
+              requeued: false,
+              reason: `重试已达上限 (${t.current_attempt}/${maxRepairs})，持续超时熔断`,
+            }, t.id, r.id);
+          }
+        }
+      }
     }
     return res.rowCount || 0;
   }

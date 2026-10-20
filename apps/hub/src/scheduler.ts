@@ -2,6 +2,7 @@ import {
   ClaimRunInput,
   RenewRunInput,
   SubmitRunInput,
+  FailRunInput,
   Run,
   Task,
   TaskState,
@@ -116,6 +117,17 @@ export class HubScheduler {
       input.workerId,
       input.fencingToken,
       input.summary
+    );
+    this.notifyNewQueuedTask();
+    return res;
+  }
+
+  async failRun(input: FailRunInput): Promise<Run> {
+    const res = await this.storage.failRun(
+      input.runId,
+      input.workerId,
+      input.fencingToken,
+      input.reason
     );
     this.notifyNewQueuedTask();
     return res;

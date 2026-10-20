@@ -4,6 +4,7 @@ import {
   ClaimRunInput,
   RenewRunInput,
   SubmitRunInput,
+  FailRunInput,
   A2AEnvelope,
   Task,
   Run,
@@ -78,6 +79,13 @@ export class HubClient {
 
   async submitRun(input: SubmitRunInput): Promise<Run> {
     return this.request(`/api/runs/${input.runId}/submit`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  async failRun(input: FailRunInput): Promise<Run> {
+    return this.request(`/api/runs/${input.runId}/fail`, {
       method: "POST",
       body: JSON.stringify(input),
     });

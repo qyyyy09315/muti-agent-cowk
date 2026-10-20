@@ -10,6 +10,7 @@ import {
   ClaimRunInputSchema,
   RenewRunInputSchema,
   SubmitRunInputSchema,
+  FailRunInputSchema,
   SendMessageInputSchema,
   RegisterWorkerInputSchema,
   HeartbeatInputSchema,
@@ -181,6 +182,12 @@ export function registerRoutes(app: FastifyInstance, storage: StorageEngine, sch
   app.post("/api/runs/:id/submit", async (req: FastifyRequest<{ Params: { id: string } }>) => {
     const input = SubmitRunInputSchema.parse({ ...req.body as any, runId: req.params.id });
     const run = await scheduler.submitRun(input);
+    return run;
+  });
+
+  app.post("/api/runs/:id/fail", async (req: FastifyRequest<{ Params: { id: string } }>) => {
+    const input = FailRunInputSchema.parse({ ...req.body as any, runId: req.params.id });
+    const run = await scheduler.failRun(input);
     return run;
   });
 

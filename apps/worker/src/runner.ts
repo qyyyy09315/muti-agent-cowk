@@ -137,6 +137,18 @@ export class WorkerRunner {
 
           try {
             await this.executePipeline(task, run);
+          } catch (execErr) {
+            console.error(`[Worker-${this.config.agentType}]: 任务执行失败，立即主动上报 Hub:`, (execErr as Error).message);
+            try {
+              await this.client.failRun({
+                runId: run.id,
+                workerId: this.workerId,
+                fencingToken: run.fencingToken,
+                reason: (execErr as Error).message,
+              });
+            } catch (reportErr) {
+              console.warn(`[Worker-${this.config.agentType}]: 失败上报提示:`, (reportErr as Error).message);
+            }
           } finally {
             this.stopLeaseRenewal();
             this.currentRunId = null;
