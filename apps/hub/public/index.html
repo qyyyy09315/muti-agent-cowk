@@ -189,6 +189,7 @@
     </div>
     <div style="display: flex; gap: 10px; align-items: center;">
       <span id="user-display" style="font-size: 0.85rem; color: var(--muted); margin-right: 6px;"></span>
+      <button class="btn btn-ghost" onclick="openMemberModal()">成员</button>
       <button class="btn btn-ghost" onclick="openTokenModal()">API 令牌</button>
       <button class="btn btn-ghost" onclick="openNewTaskModal()">+ 新建任务</button>
       <button class="btn btn-danger" onclick="triggerEmergencyStop()">急停任务</button>
@@ -297,6 +298,35 @@
       <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px;">
         <button class="btn btn-ghost" onclick="closeNewTaskModal()">取消</button>
         <button class="btn btn-solid" onclick="submitNewTask()">确认派单</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 项目成员管理 -->
+  <div class="modal-overlay" id="member-modal">
+    <div class="modal" style="width: 560px;">
+      <h3 style="font-size: 1rem; margin-bottom: 6px;">项目成员</h3>
+      <p id="member-project" style="font-size: 0.78rem; color: var(--muted); margin-bottom: 14px;"></p>
+      <div style="display: flex; gap: 8px; align-items: flex-end;">
+        <div class="form-group" style="flex: 1; margin-bottom: 0;">
+          <label class="form-label">用户名</label>
+          <input class="form-input" id="member-username" list="user-options" placeholder="例如：用户名" />
+          <datalist id="user-options"></datalist>
+        </div>
+        <div class="form-group" style="width: 150px; margin-bottom: 0;">
+          <label class="form-label">角色</label>
+          <select class="form-select" id="member-role">
+            <option value="developer">developer（建/改任务）</option>
+            <option value="reviewer">reviewer（审批）</option>
+            <option value="viewer">viewer（只读）</option>
+            <option value="owner">owner（项目负责人）</option>
+          </select>
+        </div>
+        <button class="btn btn-solid" onclick="addMember()">添加</button>
+      </div>
+      <div id="member-list" style="margin-top: 16px; max-height: 240px; overflow-y: auto;"></div>
+      <div style="display: flex; justify-content: flex-end; margin-top: 14px;">
+        <button class="btn btn-ghost" onclick="document.getElementById('member-modal').style.display='none'">关闭</button>
       </div>
     </div>
   </div>
@@ -903,6 +933,78 @@
           }, 3000);
         }
       };
+    }
+
+    // ---- 项目成员管理 ----
+    function currentProjectForMembers() {
+      return activeProjectId && activeProjectId !== "__ALL__"
+        ? activeProjectId
+        : (projectsList[0]?.id || null);
+    }
+
+    async function openMemberModal() {
+      const projectId = currentProjectForMembers();
+      if (!projectId) { alert("请先在顶部选择一个项目"); return; }
+      document.getElementById("member-modal").style.display = "flex";
+      document.getElementById("member-project").textContent = "当前项目：" + projectId;
+      document.getElementById("member-list").textContent = "正在读取...";
+      loadMembers(projectId);
+      loadUserOptions();
+    }
+
+    async function loadUserOptions() {
+      const list = document.getElementById("user-options");
+      if (!list) return;
+      try {
+        const res = await apiFetch("/api/users");
+        if (!res.ok) return; // 非管理员无法读取用户列表，仍可手动输入
+        const users = await res.json();
+        list.innerHTML = users.map(u => `<option value="${escapeHtml(u.username)}"></option>`).join("");
+      } catch {}
+    }
+
+    async function loadMembers(projectId) {
+      const box = document.getElementById("member-list");
+      try {
+        const res = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/members`);
+        if (!res.ok) { box.textContent = "无权限查看成员"; return; }
+        const members = await res.json();
+        if (!members.length) { box.innerHTML = '<p style="font-size:0.8rem;color:var(--muted)">还没有成员</p>'; return; }
+        box.innerHTML = members.map(m => `
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--line);">
+            <div>
+              <div style="font-size:0.85rem;font-weight:600;">${escapeHtml(m.username)}</div>
+              <div style="font-size:0.72rem;color:var(--muted);">${escapeHtml(m.role)}</div>
+            </div>
+            <button class="btn btn-danger btn-sm" onclick="removeMember('${escapeHtml(projectId)}','${escapeHtml(m.userId)}')">移除</button>
+          </div>`).join("");
+      } catch {
+        box.textContent = "读取失败";
+      }
+    }
+
+    async function addMember() {
+      const projectId = currentProjectForMembers();
+      if (!projectId) return;
+      const username = document.getElementById("member-username").value.trim();
+      const role = document.getElementById("member-role").value;
+      if (!username) { alert("请填写用户名"); return; }
+      const res = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/members`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, role }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { alert(data.error || "添加失败（需要 owner 或管理员）"); return; }
+      document.getElementById("member-username").value = "";
+      loadMembers(projectId);
+    }
+
+    async function removeMember(projectId, userId) {
+      if (!confirm("确定将该成员移出项目？")) return;
+      const res = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(userId)}`, { method: "DELETE" });
+      if (!res.ok) { const d = await res.json().catch(() => ({})); alert(d.error || "移除失败"); return; }
+      loadMembers(projectId);
     }
 
     // ---- API 令牌管理 ----

@@ -35,6 +35,48 @@ import {
   type Principal,
 } from "./auth.js";
 
+const ROLE_LEVEL: Record<string, number> = { viewer: 1, reviewer: 2, developer: 3, owner: 4 };
+type AccessResult = { ok: true } | { ok: false; status: number; error: string };
+
+async function checkProjectAccess(
+  storage: StorageEngine,
+  req: FastifyRequest,
+  projectId: string,
+  minRole: "viewer" | "reviewer" | "developer" | "owner"
+): Promise<AccessResult> {
+  const principal = (req as any).principal as Principal | undefined;
+  if (!principal) return { ok: false, status: 401, error: "未登录" };
+  if (principal.kind !== "user") return { ok: false, status: 403, error: "需要用户身份" };
+  if (principal.role === "admin") return { ok: true };
+  const role = await storage.getMemberRole(projectId, principal.userId);
+  if (!role) return { ok: false, status: 403, error: "不是该项目的成员" };
+  if ((ROLE_LEVEL[role] ?? 0) < ROLE_LEVEL[minRole]) {
+    return { ok: false, status: 403, error: `需要 ${minRole} 及以上权限` };
+  }
+  return { ok: true };
+}
+
+async function checkApprovalAccess(
+  storage: StorageEngine,
+  req: FastifyRequest,
+  projectId: string
+): Promise<AccessResult> {
+  const principal = (req as any).principal as Principal | undefined;
+  if (!principal) return { ok: false, status: 401, error: "未登录" };
+  if (principal.kind !== "user") return { ok: false, status: 403, error: "需要用户身份" };
+  if (principal.role === "admin") return { ok: true };
+  const role = await storage.getMemberRole(projectId, principal.userId);
+  if (role !== "owner" && role !== "reviewer") {
+    return { ok: false, status: 403, error: "需要 owner 或 reviewer 权限（开发与审批职责分离）" };
+  }
+  return { ok: true };
+}
+
+/** 鉴权关闭（本地测试）时不限制 */
+function authEnabled(): boolean {
+  return authMode() !== "off";
+}
+
 export function registerRoutes(app: FastifyInstance, storage: StorageEngine, scheduler: HubScheduler): void {
   // ===== 鉴权守卫（HUB_AUTH_MODE: off / dashboard / strict）=====
   app.addHook("onRequest", async (req: FastifyRequest, reply: FastifyReply) => {
@@ -146,7 +188,14 @@ export function registerRoutes(app: FastifyInstance, storage: StorageEngine, sch
     return reply.status(201).send(project);
   });
 
-  app.get("/api/projects", async () => storage.listProjects());
+  app.get("/api/projects", async (req: FastifyRequest) => {
+    const all = await storage.listProjects();
+    if (!authEnabled()) return all;
+    const principal = (req as any).principal as Principal | undefined;
+    if (!principal || principal.kind !== "user" || principal.role === "admin") return all;
+    const owned = new Set(await storage.listUserProjects(principal.userId));
+    return all.filter((p) => owned.has(p.id));
+  });
 
   // 3. Worker 登记与心跳
   app.post("/api/workers/register", async (req: FastifyRequest) => {
@@ -170,6 +219,10 @@ export function registerRoutes(app: FastifyInstance, storage: StorageEngine, sch
   // 4. 任务调度
   app.post("/api/tasks", async (req: FastifyRequest, reply: FastifyReply) => {
     const input = CreateTaskInputSchema.parse(req.body);
+    if (authEnabled()) {
+      const access = await checkProjectAccess(storage, req, input.projectId, "developer");
+      if (!access.ok) return reply.code(access.status).send({ error: access.error });
+    }
     const task = await storage.createTask({
       id: `task_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       projectId: input.projectId,
@@ -207,15 +260,30 @@ export function registerRoutes(app: FastifyInstance, storage: StorageEngine, sch
     if (req.query.projectId) {
       return storage.listTasks(req.query.projectId, req.query.state as any);
     }
-    return storage.listAllTasks(100);
+    const tasks = await storage.listAllTasks(200);
+    if (!authEnabled()) return tasks;
+    const principal = (req as any).principal as Principal | undefined;
+    if (!principal || principal.kind !== "user" || principal.role === "admin") return tasks;
+    const owned = new Set(await storage.listUserProjects(principal.userId));
+    return tasks.filter((t) => owned.has(t.projectId));
   });
 
-  app.get("/api/projects/:projectId/tasks", async (req: FastifyRequest<{ Params: { projectId: string }; Querystring: { state?: string } }>) => {
+  app.get("/api/projects/:projectId/tasks", async (req: FastifyRequest<{ Params: { projectId: string }; Querystring: { state?: string } }>, reply: FastifyReply) => {
+    if (authEnabled()) {
+      const access = await checkProjectAccess(storage, req, req.params.projectId, "viewer");
+      if (!access.ok) return reply.code(access.status).send({ error: access.error });
+    }
     return storage.listTasks(req.params.projectId, req.query.state as any);
   });
 
-  app.post("/api/tasks/:id/actions", async (req: FastifyRequest<{ Params: { id: string }; Body: { action: "pause" | "resume" | "cancel" | "requeue" } }>) => {
+  app.post("/api/tasks/:id/actions", async (req: FastifyRequest<{ Params: { id: string }; Body: { action: "pause" | "resume" | "cancel" | "requeue" } }>, reply: FastifyReply) => {
     const { action } = req.body;
+    if (authEnabled()) {
+      const task = await storage.getTask(req.params.id);
+      if (!task) return reply.code(404).send({ error: "任务不存在" });
+      const access = await checkProjectAccess(storage, req, task.projectId, "developer");
+      if (!access.ok) return reply.code(access.status).send({ error: access.error });
+    }
     let targetState: any = TaskState.PAUSED;
     if (action === "resume") targetState = TaskState.RUNNING;
     if (action === "requeue") targetState = TaskState.QUEUED;
@@ -278,7 +346,11 @@ export function registerRoutes(app: FastifyInstance, storage: StorageEngine, sch
     return storage.listMessages(req.params.id, req.query.threadId);
   });
 
-  app.get("/api/projects/:projectId/messages", async (req: FastifyRequest<{ Params: { projectId: string }; Querystring: { limit?: string } }>) => {
+  app.get("/api/projects/:projectId/messages", async (req: FastifyRequest<{ Params: { projectId: string }; Querystring: { limit?: string } }>, reply: FastifyReply) => {
+    if (authEnabled()) {
+      const access = await checkProjectAccess(storage, req, req.params.projectId, "viewer");
+      if (!access.ok) return reply.code(access.status).send({ error: access.error });
+    }
     const limit = req.query.limit ? parseInt(req.query.limit, 10) : 100;
     return storage.listProjectMessages(req.params.projectId, limit);
   });
@@ -286,6 +358,51 @@ export function registerRoutes(app: FastifyInstance, storage: StorageEngine, sch
   app.get("/api/messages", async (req: FastifyRequest<{ Querystring: { limit?: string } }>) => {
     const limit = req.query.limit ? parseInt(req.query.limit, 10) : 100;
     return storage.listAllMessages(limit);
+  });
+
+  // 6.4 项目成员与用户列表
+  app.get("/api/users", async (req: FastifyRequest, reply: FastifyReply) => {
+    const principal = (req as any).principal as Principal | undefined;
+    if (authEnabled() && (!principal || principal.kind !== "user" || principal.role !== "admin")) {
+      return reply.code(403).send({ error: "需要管理员权限" });
+    }
+    return storage.listUsers();
+  });
+
+  app.get("/api/projects/:projectId/members", async (req: FastifyRequest<{ Params: { projectId: string } }>, reply: FastifyReply) => {
+    if (authEnabled()) {
+      const access = await checkProjectAccess(storage, req, req.params.projectId, "viewer");
+      if (!access.ok) return reply.code(access.status).send({ error: access.error });
+    }
+    return storage.listMembers(req.params.projectId);
+  });
+
+  app.put("/api/projects/:projectId/members", async (req: FastifyRequest<{ Params: { projectId: string } }>, reply: FastifyReply) => {
+    if (authEnabled()) {
+      const access = await checkProjectAccess(storage, req, req.params.projectId, "owner");
+      if (!access.ok) return reply.code(access.status).send({ error: access.error });
+    }
+    const body = req.body as { username?: string; role?: string };
+    const username = String(body?.username || "").trim();
+    const role = String(body?.role || "developer").trim();
+    if (!username) return reply.code(400).send({ error: "请填写用户名" });
+    if (!["owner", "developer", "reviewer", "viewer"].includes(role)) {
+      return reply.code(400).send({ error: "角色只能是 owner/developer/reviewer/viewer" });
+    }
+    const user = await storage.getUserByUsername(username);
+    if (!user) return reply.code(404).send({ error: `用户 ${username} 不存在` });
+    const member = await storage.upsertMember(req.params.projectId, user.id, role as any);
+    return reply.status(201).send(member);
+  });
+
+  app.delete("/api/projects/:projectId/members/:userId", async (req: FastifyRequest<{ Params: { projectId: string; userId: string } }>, reply: FastifyReply) => {
+    if (authEnabled()) {
+      const access = await checkProjectAccess(storage, req, req.params.projectId, "owner");
+      if (!access.ok) return reply.code(access.status).send({ error: access.error });
+    }
+    const ok = await storage.removeMember(req.params.projectId, req.params.userId);
+    if (!ok) return reply.code(404).send({ error: "该用户不在项目中" });
+    return { ok: true };
   });
 
   // 6.5 API Token 管理（明文仅创建时返回一次）
@@ -431,12 +548,22 @@ export function registerRoutes(app: FastifyInstance, storage: StorageEngine, sch
     return reply.status(201).send(approval);
   });
 
-  app.get("/api/projects/:projectId/approvals", async (req: FastifyRequest<{ Params: { projectId: string }; Querystring: { status?: string } }>) => {
+  app.get("/api/projects/:projectId/approvals", async (req: FastifyRequest<{ Params: { projectId: string }; Querystring: { status?: string } }>, reply: FastifyReply) => {
+    if (authEnabled()) {
+      const access = await checkProjectAccess(storage, req, req.params.projectId, "viewer");
+      if (!access.ok) return reply.code(access.status).send({ error: access.error });
+    }
     return storage.listApprovals(req.params.projectId, req.query.status);
   });
 
-  app.post("/api/approvals/:id/decision", async (req: FastifyRequest<{ Params: { id: string } }>) => {
+  app.post("/api/approvals/:id/decision", async (req: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) => {
     const input = ApprovalDecisionInputSchema.parse(req.body);
+    if (authEnabled()) {
+      const approval = await storage.getApproval(req.params.id);
+      if (!approval) return reply.code(404).send({ error: "审批不存在" });
+      const access = await checkApprovalAccess(storage, req, approval.projectId);
+      if (!access.ok) return reply.code(access.status).send({ error: access.error });
+    }
     const principal = (req as any).principal as Principal | undefined;
     const decidedBy = principal?.kind === "user" ? principal.username : "admin";
     return storage.decideApproval(req.params.id, input.decision, decidedBy);

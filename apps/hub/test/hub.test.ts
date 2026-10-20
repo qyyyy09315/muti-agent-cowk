@@ -552,3 +552,85 @@ test("API Token 可吊销，吊销后立即失效", async () => {
     delete process.env.HUB_AUTH_MODE;
   }
 });
+
+test("多用户成员与角色：项目可见性、建任务与审批权限", async () => {
+  process.env.HUB_AUTH_MODE = "dashboard";
+  const storage = new MemoryStorageEngine();
+  const pw = hashPassword("Passw0rd!");
+  await storage.createUser({ id: "u_admin", username: "admin", passwordHash: pw, role: "admin" });
+  await storage.createUser({ id: "u_dev", username: "dev", passwordHash: pw, role: "member" });
+  await storage.createUser({ id: "u_viewer", username: "viewer", passwordHash: pw, role: "member" });
+  await storage.createUser({ id: "u_rev", username: "reviewer", passwordHash: pw, role: "member" });
+  await storage.createUser({ id: "u_out", username: "outsider", passwordHash: pw, role: "member" });
+
+  const app = await buildServer({ storage });
+  await app.ready();
+  try {
+    await storage.createProject({ id: "p_mem", name: "Members", uvcsRepo: "r", baseBranch: "/main", createdAt: new Date().toISOString() });
+    await storage.upsertMember("p_mem", "u_dev", "developer");
+    await storage.upsertMember("p_mem", "u_viewer", "viewer");
+    await storage.upsertMember("p_mem", "u_rev", "reviewer");
+
+    const admin = await loginToken(app, "admin", "Passw0rd!");
+    const dev = await loginToken(app, "dev", "Passw0rd!");
+    const viewer = await loginToken(app, "viewer", "Passw0rd!");
+    const reviewer = await loginToken(app, "reviewer", "Passw0rd!");
+    const outsider = await loginToken(app, "outsider", "Passw0rd!");
+
+    // 项目可见性
+    const devProjects = await app.inject({ method: "GET", url: "/api/projects", headers: { authorization: `Bearer ${dev}` } });
+    assert.equal(devProjects.statusCode, 200);
+    assert.deepEqual(JSON.parse(devProjects.body).map((p: any) => p.id), ["p_mem"]);
+
+    const outProjects = await app.inject({ method: "GET", url: "/api/projects", headers: { authorization: `Bearer ${outsider}` } });
+    assert.deepEqual(JSON.parse(outProjects.body), []);
+
+    // 建任务：developer 可以，viewer 不可以
+    const payload = { projectId: "p_mem", title: "t", goal: "g", acceptanceCriteria: "a", assignedAgent: "grok-a" };
+    const devCreate = await app.inject({ method: "POST", url: "/api/tasks", headers: { authorization: `Bearer ${dev}` }, payload });
+    assert.equal(devCreate.statusCode, 201);
+    const viewerCreate = await app.inject({ method: "POST", url: "/api/tasks", headers: { authorization: `Bearer ${viewer}` }, payload });
+    assert.equal(viewerCreate.statusCode, 403);
+
+    // 成员管理：developer 不能改，admin 可以
+    const devPut = await app.inject({
+      method: "PUT", url: "/api/projects/p_mem/members",
+      headers: { authorization: `Bearer ${dev}` },
+      payload: { username: "outsider", role: "viewer" },
+    });
+    assert.equal(devPut.statusCode, 403);
+    const adminPut = await app.inject({
+      method: "PUT", url: "/api/projects/p_mem/members",
+      headers: { authorization: `Bearer ${admin}` },
+      payload: { username: "outsider", role: "viewer" },
+    });
+    assert.equal(adminPut.statusCode, 201);
+
+    // 审批：viewer/developer 不能，reviewer 可以
+    await storage.createApproval({
+      id: "appr_1", projectId: "p_mem", taskId: "t", runId: "r", action: "cm lock",
+      paramsHash: "h", description: "d", details: {}, status: "pending",
+      requestedBy: "grok-a", decidedBy: null, decidedAt: null,
+      expiresAt: new Date(Date.now() + 60000).toISOString(), createdAt: new Date().toISOString(),
+    });
+    const viewerDecide = await app.inject({
+      method: "POST", url: "/api/approvals/appr_1/decision",
+      headers: { authorization: `Bearer ${viewer}` }, payload: { decision: "approved" },
+    });
+    assert.equal(viewerDecide.statusCode, 403);
+    const devDecide = await app.inject({
+      method: "POST", url: "/api/approvals/appr_1/decision",
+      headers: { authorization: `Bearer ${dev}` }, payload: { decision: "approved" },
+    });
+    assert.equal(devDecide.statusCode, 403);
+    const revDecide = await app.inject({
+      method: "POST", url: "/api/approvals/appr_1/decision",
+      headers: { authorization: `Bearer ${reviewer}` }, payload: { decision: "approved" },
+    });
+    assert.equal(revDecide.statusCode, 200);
+    assert.equal(JSON.parse(revDecide.body).decidedBy, "reviewer");
+  } finally {
+    await app.close();
+    delete process.env.HUB_AUTH_MODE;
+  }
+});

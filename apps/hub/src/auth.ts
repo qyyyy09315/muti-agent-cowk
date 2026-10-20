@@ -134,6 +134,9 @@ export function classifyRequest(method: string, rawUrl: string): RoutePolicy {
   const path = new URL(rawUrl, "http://127.0.0.1").pathname;
   const m = method.toUpperCase();
 
+  // 非 API 路径（控制台首页、静态资源、favicon）必须公开，否则连登录页都打不开
+  if (!path.startsWith("/api/")) return "public";
+
   if (path === "/healthz" || path === "/readyz") return "public";
   if (path === "/api/auth/login") return "public";
   if (path === "/api/auth/logout" || path === "/api/auth/me") return "shared";

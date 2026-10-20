@@ -25,6 +25,16 @@ export type StoredApiToken = {
   revokedAt: string | null;
 };
 
+export type MemberRole = "owner" | "developer" | "reviewer" | "viewer";
+
+export type ProjectMember = {
+  projectId: string;
+  userId: string;
+  username: string;
+  role: MemberRole;
+  createdAt: string;
+};
+
 export interface StorageEngine {
   init(): Promise<void>;
   close(): Promise<void>;
@@ -83,6 +93,14 @@ export interface StorageEngine {
   createUser(user: { id: string; username: string; passwordHash: string; role?: "admin" | "member"; createdAt?: string }): Promise<{ id: string; username: string; passwordHash: string; role: "admin" | "member"; createdAt: string }>;
   getUserByUsername(username: string): Promise<{ id: string; username: string; passwordHash: string; role: "admin" | "member"; createdAt: string } | null>;
   getUserById(id: string): Promise<{ id: string; username: string; passwordHash: string; role: "admin" | "member"; createdAt: string } | null>;
+  listUsers(): Promise<{ id: string; username: string; role: "admin" | "member"; createdAt: string }[]>;
+
+  // 项目成员
+  listMembers(projectId: string): Promise<ProjectMember[]>;
+  listUserProjects(userId: string): Promise<string[]>;
+  getMemberRole(projectId: string, userId: string): Promise<MemberRole | null>;
+  upsertMember(projectId: string, userId: string, role: MemberRole): Promise<ProjectMember>;
+  removeMember(projectId: string, userId: string): Promise<boolean>;
 
   // API Token（只存哈希）
   createApiToken(token: StoredApiToken): Promise<StoredApiToken>;

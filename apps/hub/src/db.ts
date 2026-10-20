@@ -54,6 +54,7 @@ export class MemoryStorageEngine implements StorageEngine {
   private approvals = new Map<string, Approval>();
   private artifacts = new Map<string, Artifact>();
   private users = new Map<string, { id: string; username: string; passwordHash: string; role: "admin" | "member"; createdAt: string }>();
+  private members = new Map<string, { projectId: string; userId: string; role: any; createdAt: string }>();
   private apiTokens = new Map<string, {
     id: string; userId: string; agentId: string | null; label: string;
     tokenHash: string; createdAt: string; lastUsedAt: string | null; revokedAt: string | null;
@@ -461,6 +462,49 @@ export class MemoryStorageEngine implements StorageEngine {
 
   async getUserById(id: string): Promise<any> {
     return Array.from(this.users.values()).find((u) => u.id === id) || null;
+  }
+
+  async listUsers(): Promise<any[]> {
+    return Array.from(this.users.values())
+      .map((u) => ({ id: u.id, username: u.username, role: u.role, createdAt: u.createdAt }))
+      .sort((a, b) => (a.username < b.username ? -1 : 1));
+  }
+
+  async listMembers(projectId: string): Promise<any[]> {
+    return Array.from(this.members.values())
+      .filter((m) => m.projectId === projectId)
+      .map((m) => {
+        const user = Array.from(this.users.values()).find((u) => u.id === m.userId);
+        return {
+          projectId: m.projectId,
+          userId: m.userId,
+          username: user?.username || m.userId,
+          role: m.role,
+          createdAt: m.createdAt,
+        };
+      });
+  }
+
+  async listUserProjects(userId: string): Promise<string[]> {
+    return Array.from(this.members.values()).filter((m) => m.userId === userId).map((m) => m.projectId);
+  }
+
+  async getMemberRole(projectId: string, userId: string): Promise<any> {
+    const row = this.members.get(`${projectId}:${userId}`);
+    return row ? row.role : null;
+  }
+
+  async upsertMember(projectId: string, userId: string, role: any): Promise<any> {
+    const key = `${projectId}:${userId}`;
+    const existing = this.members.get(key);
+    const record = { projectId, userId, role, createdAt: existing?.createdAt || new Date().toISOString() };
+    this.members.set(key, record);
+    const user = Array.from(this.users.values()).find((u) => u.id === userId);
+    return { ...record, username: user?.username || userId };
+  }
+
+  async removeMember(projectId: string, userId: string): Promise<boolean> {
+    return this.members.delete(`${projectId}:${userId}`);
   }
 
   async createApiToken(token: any): Promise<any> {
@@ -1278,6 +1322,81 @@ export class PostgresStorageEngine implements StorageEngine {
       role: r.role,
       createdAt: r.created_at.toISOString(),
     };
+  }
+
+  async listUsers(): Promise<any[]> {
+    const res = await this.pool.query(
+      `SELECT id, username, role, created_at FROM users ORDER BY username ASC`
+    );
+    return res.rows.map((r) => ({
+      id: r.id,
+      username: r.username,
+      role: r.role,
+      createdAt: r.created_at.toISOString(),
+    }));
+  }
+
+  async listMembers(projectId: string): Promise<any[]> {
+    const res = await this.pool.query(
+      `SELECT pm.project_id, pm.user_id, pm.role, pm.created_at, u.username
+       FROM project_members pm JOIN users u ON u.id = pm.user_id
+       WHERE pm.project_id = $1 ORDER BY pm.created_at ASC`,
+      [projectId]
+    );
+    return res.rows.map((r) => ({
+      projectId: r.project_id,
+      userId: r.user_id,
+      username: r.username,
+      role: r.role,
+      createdAt: r.created_at.toISOString(),
+    }));
+  }
+
+  async listUserProjects(userId: string): Promise<string[]> {
+    const res = await this.pool.query(
+      `SELECT project_id FROM project_members WHERE user_id = $1`,
+      [userId]
+    );
+    return res.rows.map((r) => r.project_id);
+  }
+
+  async getMemberRole(projectId: string, userId: string): Promise<any> {
+    const res = await this.pool.query(
+      `SELECT role FROM project_members WHERE project_id = $1 AND user_id = $2`,
+      [projectId, userId]
+    );
+    return res.rows[0]?.role ?? null;
+  }
+
+  async upsertMember(projectId: string, userId: string, role: any): Promise<any> {
+    await this.pool.query(
+      `INSERT INTO project_members (project_id, user_id, role, created_at)
+       VALUES ($1, $2, $3, NOW())
+       ON CONFLICT (project_id, user_id) DO UPDATE SET role = EXCLUDED.role`,
+      [projectId, userId, role]
+    );
+    const res = await this.pool.query(
+      `SELECT pm.project_id, pm.user_id, pm.role, pm.created_at, u.username
+       FROM project_members pm JOIN users u ON u.id = pm.user_id
+       WHERE pm.project_id = $1 AND pm.user_id = $2`,
+      [projectId, userId]
+    );
+    const r = res.rows[0];
+    return {
+      projectId: r.project_id,
+      userId: r.user_id,
+      username: r.username,
+      role: r.role,
+      createdAt: r.created_at.toISOString(),
+    };
+  }
+
+  async removeMember(projectId: string, userId: string): Promise<boolean> {
+    const res = await this.pool.query(
+      `DELETE FROM project_members WHERE project_id = $1 AND user_id = $2`,
+      [projectId, userId]
+    );
+    return (res.rowCount || 0) > 0;
   }
 
   async createApiToken(token: any): Promise<any> {
