@@ -180,3 +180,68 @@ test("Worker 在线状态由服务器时钟决定", async () => {
     await app.close();
   }
 });
+
+test("执行端提问后任务等待对端，答复后重新排队", async () => {
+  const storage = new MemoryStorageEngine();
+  const app = await buildServer({ storage });
+  await app.ready();
+  try {
+    await app.inject({
+      method: "POST",
+      url: "/api/projects",
+      payload: { id: "proj_demo", name: "Demo", uvcsRepo: "demo@cloud", baseBranch: "/main" },
+    });
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/tasks",
+      payload: {
+        projectId: "proj_demo",
+        title: "对齐接口",
+        goal: "向对端确认字段",
+        acceptanceCriteria: "收到答复后继续",
+        assignedAgent: "grok",
+      },
+    });
+    const task = JSON.parse(created.body);
+    const claimed = await app.inject({
+      method: "POST",
+      url: "/api/runs/claim",
+      payload: { workerId: "worker_grok_01", projectId: "proj_demo", agentType: "grok", timeoutSeconds: 1 },
+    });
+    assert.equal(JSON.parse(claimed.body).claimed, true);
+
+    const asked = await app.inject({
+      method: "POST",
+      url: "/api/messages",
+      payload: {
+        projectId: "proj_demo",
+        taskId: task.id,
+        threadId: "thread_1",
+        fromAgent: "grok",
+        toAgent: "codex",
+        content: "这个字段要不要音频路径",
+        idempotencyKey: "ask_1",
+      },
+    });
+    assert.equal(asked.statusCode, 201);
+    const parked = await storage.getTask(task.id);
+    assert.equal(parked?.state, "waiting_peer");
+
+    const resumed = await app.inject({
+      method: "POST",
+      url: `/api/tasks/${task.id}/actions`,
+      payload: { action: "requeue" },
+    });
+    assert.equal(resumed.statusCode, 200);
+    assert.equal(JSON.parse(resumed.body).state, "queued");
+
+    const again = await app.inject({
+      method: "POST",
+      url: "/api/runs/claim",
+      payload: { workerId: "worker_grok_01", projectId: "proj_demo", agentType: "grok", timeoutSeconds: 1 },
+    });
+    assert.equal(JSON.parse(again.body).claimed, true);
+  } finally {
+    await app.close();
+  }
+});

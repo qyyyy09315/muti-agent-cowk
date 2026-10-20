@@ -105,4 +105,11 @@ export class HubClient {
   async sendMessage(input: SendMessageInput): Promise<unknown> {
     return this.request('/api/messages', { method: 'POST', body: JSON.stringify(input) });
   }
+
+  async requeueTask(taskId: string): Promise<void> {
+    await this.request(`/api/tasks/${encodeURIComponent(taskId)}/actions`, {
+      method: 'POST',
+      body: JSON.stringify({ action: 'requeue' }),
+    });
+  }
 }

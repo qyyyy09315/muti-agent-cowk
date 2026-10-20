@@ -22,6 +22,8 @@ test("state machine valid transitions", () => {
   // 等待对端 / 人工及恢复
   assert.equal(isValidStateTransition(TaskState.RUNNING, TaskState.WAITING_PEER), true);
   assert.equal(isValidStateTransition(TaskState.WAITING_PEER, TaskState.RUNNING), true);
+  assert.equal(isValidStateTransition(TaskState.LEASED, TaskState.WAITING_PEER), true);
+  assert.equal(isValidStateTransition(TaskState.WAITING_PEER, TaskState.QUEUED), true);
   assert.equal(isValidStateTransition(TaskState.RUNNING, TaskState.WAITING_HUMAN), true);
   assert.equal(isValidStateTransition(TaskState.WAITING_HUMAN, TaskState.RUNNING), true);
 
