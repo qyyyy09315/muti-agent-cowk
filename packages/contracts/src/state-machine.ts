@@ -33,6 +33,7 @@ export const ALLOWED_TRANSITIONS: Readonly<Record<TaskStateType, ReadonlySet<Tas
     TaskState.RUNNING,
     TaskState.SUBMITTED,
     TaskState.QUEUED, // 租约超时重新入队
+    TaskState.WAITING_PEER, // 执行端向对端提问后停下等答复
     TaskState.FAILED,
     TaskState.CANCELLED,
     TaskState.PAUSED,
@@ -61,6 +62,7 @@ export const ALLOWED_TRANSITIONS: Readonly<Record<TaskStateType, ReadonlySet<Tas
   ]),
   [TaskState.WAITING_PEER]: new Set([
     TaskState.RUNNING, // 收到对端回复后恢复
+    TaskState.QUEUED, // 收到对端回复后重新排队，原执行端自动领回
     TaskState.FAILED,
     TaskState.CANCELLED,
     TaskState.WAITING_HUMAN, // 互问成环转人工

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { MessageListener } from "./message-listener.js";
-import { CodexMessageResponder } from "./codex-message-responder.js";
+import { SessionBridge } from "./session-bridge.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -89,8 +89,9 @@ export class WorkerRunner {
       const stateFile = path.join(this.config.messageStateDir || path.join(os.homedir(), '.ai-collab', 'inbox'), `${scope}.json`);
       let listener: MessageListener;
       try {
-        listener = new MessageListener(this.client, new CodexMessageResponder(),
-          this.config.projectId, this.config.agentType, stateFile);
+        const bridge = new SessionBridge(this.config.agentType, this.config.workspaceDir);
+        listener = new MessageListener(this.client, bridge,
+          this.config.projectId, this.config.agentType, stateFile, console.log, bridge);
       } catch (error) {
         await this.stop();
         throw error;
@@ -101,7 +102,7 @@ export class WorkerRunner {
         this.messageAbort.abort();
         console.error('[Message listener stopped]', error.message);
       });
-      console.log(`[Messages]: Codex responder enabled for role ${this.config.agentType}; cursor: ${stateFile}`);
+      console.log(`[Messages]: listening for role ${this.config.agentType}; replies enter the current ${this.config.agentType} project session; cursor: ${stateFile}`);
     }
 
     let backoffMs = 2000;
