@@ -167,5 +167,16 @@ send messages to the production Hub.
 ## Open Source Credits & Standards
 See [NOTICE.md](./NOTICE.md) for full compliance details regarding the Model Context Protocol (MCP), Agent2Agent (A2A) protocol, and Unity Version Control specifications.
 
+## Local Worker Monitor / 本机协作运行台
+
+A light-theme, read-only loopback dashboard for Worker heartbeat, local CLI processes,
+project messages, task retries, Codex public conversation records, and stdout/stderr.
+Missing launcher metadata falls back to the latest local logs. Credentials remain server-side.
+
+On Windows, run `./scripts/start_worker_monitor.ps1 -ProfileDir '<your-worker-profile>'`
+to start the background service and open `http://127.0.0.1:8787/`.
+For a foreground server, use `node scripts/worker-monitor/server.mjs --profile '<your-worker-profile>'`.
+See [configuration and usage](scripts/worker-monitor/README.md); run `pnpm test:monitor` for its tests.
+
 ## License
 MIT License.
