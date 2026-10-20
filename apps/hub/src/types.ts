@@ -33,6 +33,7 @@ export interface StorageEngine {
   createTask(task: Task): Promise<Task>;
   getTask(id: string): Promise<Task | null>;
   listTasks(projectId: string, state?: TaskStateType): Promise<Task[]>;
+  listAllTasks(limit?: number): Promise<Task[]>;
   updateTaskState(taskId: string, newState: TaskStateType, expectedVersion?: number): Promise<Task>;
 
   // Run & Lease (带行锁抢单)
@@ -49,6 +50,8 @@ export interface StorageEngine {
   // Messages
   saveMessage(message: Message): Promise<{ message: Message; duplicate: boolean }>;
   listMessages(taskId: string, threadId?: string): Promise<Message[]>;
+  listProjectMessages(projectId: string, limit?: number): Promise<Message[]>;
+  listAllMessages(limit?: number): Promise<Message[]>;
 
   // Events & Outbox
   emitEvent(projectId: string, type: string, payload: Record<string, unknown>, taskId?: string, runId?: string): Promise<Event>;

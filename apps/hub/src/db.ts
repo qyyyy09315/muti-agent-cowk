@@ -113,6 +113,12 @@ export class MemoryStorageEngine implements StorageEngine {
     );
   }
 
+  async listAllTasks(limit = 100): Promise<Task[]> {
+    return Array.from(this.tasks.values())
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .slice(0, limit);
+  }
+
   async updateTaskState(taskId: string, newState: TaskStateType, expectedVersion?: number): Promise<Task> {
     const task = this.tasks.get(taskId);
     if (!task) throw new CollabError(ErrorCode.TASK_NOT_FOUND, `任务不存在: ${taskId}`, 404);
@@ -304,6 +310,19 @@ export class MemoryStorageEngine implements StorageEngine {
     return Array.from(this.messages.values()).filter(
       (m) => m.taskId === taskId && (!threadId || m.threadId === threadId)
     );
+  }
+
+  async listProjectMessages(projectId: string, limit = 100): Promise<Message[]> {
+    return Array.from(this.messages.values())
+      .filter((m) => m.projectId === projectId)
+      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
+      .slice(-limit);
+  }
+
+  async listAllMessages(limit = 100): Promise<Message[]> {
+    return Array.from(this.messages.values())
+      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
+      .slice(-limit);
   }
 
   async emitEvent(
@@ -547,6 +566,14 @@ export class PostgresStorageEngine implements StorageEngine {
     }
     q += ` ORDER BY created_at ASC`;
     const res = await this.pool.query(q, params);
+    return res.rows.map(this.mapTask);
+  }
+
+  async listAllTasks(limit = 100): Promise<Task[]> {
+    const res = await this.pool.query(
+      `SELECT * FROM tasks ORDER BY created_at DESC LIMIT $1`,
+      [limit]
+    );
     return res.rows.map(this.mapTask);
   }
 
@@ -800,6 +827,44 @@ export class PostgresStorageEngine implements StorageEngine {
     q += ` ORDER BY created_at ASC`;
     const res = await this.pool.query(q, params);
     return res.rows.map((r) => ({
+      id: r.id,
+      projectId: r.project_id,
+      taskId: r.task_id,
+      threadId: r.thread_id,
+      fromAgent: r.from_agent,
+      toAgent: r.to_agent,
+      content: r.content,
+      replyToId: r.reply_to_id,
+      idempotencyKey: r.idempotency_key,
+      createdAt: r.created_at.toISOString(),
+    }));
+  }
+
+  async listProjectMessages(projectId: string, limit = 100): Promise<Message[]> {
+    const res = await this.pool.query(
+      `SELECT * FROM messages WHERE project_id = $1 ORDER BY created_at DESC LIMIT $2`,
+      [projectId, limit]
+    );
+    return res.rows.reverse().map((r) => ({
+      id: r.id,
+      projectId: r.project_id,
+      taskId: r.task_id,
+      threadId: r.thread_id,
+      fromAgent: r.from_agent,
+      toAgent: r.to_agent,
+      content: r.content,
+      replyToId: r.reply_to_id,
+      idempotencyKey: r.idempotency_key,
+      createdAt: r.created_at.toISOString(),
+    }));
+  }
+
+  async listAllMessages(limit = 100): Promise<Message[]> {
+    const res = await this.pool.query(
+      `SELECT * FROM messages ORDER BY created_at DESC LIMIT $1`,
+      [limit]
+    );
+    return res.rows.reverse().map((r) => ({
       id: r.id,
       projectId: r.project_id,
       taskId: r.task_id,
