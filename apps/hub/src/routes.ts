@@ -146,14 +146,15 @@ export function registerRoutes(app: FastifyInstance, storage: StorageEngine, sch
     return storage.listTasks(req.params.projectId, req.query.state as any);
   });
 
-  app.post("/api/tasks/:id/actions", async (req: FastifyRequest<{ Params: { id: string }; Body: { action: "pause" | "resume" | "cancel" } }>) => {
+  app.post("/api/tasks/:id/actions", async (req: FastifyRequest<{ Params: { id: string }; Body: { action: "pause" | "resume" | "cancel" | "requeue" } }>) => {
     const { action } = req.body;
     let targetState: any = TaskState.PAUSED;
     if (action === "resume") targetState = TaskState.RUNNING;
+    if (action === "requeue") targetState = TaskState.QUEUED;
     if (action === "cancel") targetState = TaskState.CANCELLED;
 
     const updated = await storage.updateTaskState(req.params.id, targetState as any);
-    if (action === "resume") scheduler.notifyNewQueuedTask();
+    if (action === "resume" || action === "requeue") scheduler.notifyNewQueuedTask();
     return updated;
   });
 
@@ -186,6 +187,16 @@ export function registerRoutes(app: FastifyInstance, storage: StorageEngine, sch
       createdAt: new Date().toISOString(),
     };
     const res = await storage.saveMessage(msg);
+    if (!res.duplicate && !msg.replyToId) {
+      const task = await storage.getTask(msg.taskId);
+      if (
+        task &&
+        task.assignedAgent === msg.fromAgent &&
+        (task.state === TaskState.LEASED || task.state === TaskState.RUNNING)
+      ) {
+        await storage.updateTaskState(task.id, TaskState.WAITING_PEER);
+      }
+    }
     return reply.status(res.duplicate ? 200 : 201).send(res);
   });
 

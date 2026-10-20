@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import { MessageSchema, TaskSchema, type Event, type Message, type SendMessageInput } from '@ai-collab/contracts';
 import { MessageListener, type MessageResponder } from '../src/message-listener.js';
 import { CodexMessageResponder, codexCommand } from '../src/codex-message-responder.js';
+import { SessionBridge } from '../src/session-bridge.js';
 
 const task = TaskSchema.parse({ id: 'task_1', projectId: 'project_1', title: 'Chat', goal: 'Confirm receipt',
   acceptanceCriteria: 'A reply', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
@@ -61,6 +62,27 @@ test('replies to root messages from both storage event formats, preserves routin
     assert.equal(h.sent[0].threadId, 'thread_1');
     await h.listener().pollOnce(new AbortController().signal);
     assert.equal(h.calls(), 2, 'restart must not replay acknowledged events');
+  } finally { h.cleanup(); }
+});
+
+test('peer replies are delivered into the open session and requeue a parked task', async () => {
+  const h = harness();
+  try {
+    const parked = { ...task, state: 'waiting_peer' as const, assignedAgent: 'codex' as const };
+    const requeued: string[] = [];
+    let delivered = 0;
+    h.add(message('answer', { replyToId: 'earlier', fromAgent: 'grok', toAgent: 'codex' }));
+    const listener = new MessageListener(
+      { ...h.client, async getTask() { return parked; }, async requeueTask(id: string) { requeued.push(id); } },
+      h.responder, task.projectId, 'codex', path.join(h.directory, 'resume.json'), line => h.log.push(line),
+      { async deliver() { delivered++; return 'continued'; } },
+    );
+    await listener.pollOnce(new AbortController().signal);
+    assert.equal(delivered, 1);
+    assert.equal(h.calls(), 0);
+    assert.equal(h.sent.length, 0);
+    assert.deepEqual(requeued, [task.id]);
+    assert.match(h.log.join('\n'), /Task resumed/);
   } finally { h.cleanup(); }
 });
 
@@ -152,6 +174,27 @@ test('one local listener owns the inbox; stop removes its lock', async () => {
     assert.equal(fs.existsSync(path.join(h.directory, 'inbox.json.lock')), false);
     h.cleanup();
   }
+});
+
+test('session bridge resumes the current project session, then falls back to a new turn', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'collab-session-test-'));
+  const fakeCli = path.join(directory, 'fake.cjs');
+  const workspace = path.join(directory, 'project');
+  fs.mkdirSync(workspace);
+  fs.writeFileSync(fakeCli, `
+    const fs = require('node:fs');
+    const args = process.argv.slice(2);
+    const mode = args.includes('--resume-session') ? 'resume' : 'new';
+    const marker = args[args.indexOf(mode === 'resume' ? '--resume-session' : '--new-session') + 1];
+    const prompt = fs.readFileSync(marker, 'utf8');
+    if (!prompt.includes('peer')) process.exit(4);
+    if (mode === 'resume') process.exit(2);
+    process.stdout.write('session continued');
+  `);
+  try {
+    const bridge = new SessionBridge('grok', workspace, [process.execPath, fakeCli], 5000);
+    assert.equal(await bridge.deliver('peer says hello', new AbortController().signal), 'session continued');
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });
 
 test('Codex subprocess reads stdin and returns only final output, with text-only restrictions', async () => {

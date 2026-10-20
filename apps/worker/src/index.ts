@@ -7,7 +7,7 @@ function parseArgs(): WorkerConfig {
   let agentType: "grok" | "codex" = "grok";
   let workspaceDir = process.env.WORKSPACE_DIR || process.cwd();
   let token = process.env.HUB_TOKEN;
-  let listenMessages = false;
+  let listenMessages = true;
   let messagesOnly = false;
   let messageStateDir: string | undefined;
   let workerId: string | undefined;
@@ -19,6 +19,7 @@ function parseArgs(): WorkerConfig {
     if (args[i] === "--workspace" && args[i + 1]) workspaceDir = args[++i];
     if (args[i] === "--token" && args[i + 1]) token = args[++i];
     if (args[i] === "--listen-messages") listenMessages = true;
+    if (args[i] === "--no-listen-messages") listenMessages = false;
     if (args[i] === "--messages-only") { messagesOnly = true; listenMessages = true; }
     if (args[i] === "--message-state-dir" && args[i + 1]) messageStateDir = args[++i];
     if (args[i] === "--worker-id" && args[i + 1]) workerId = args[++i];

@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { spawn, ChildProcess, execSync } from "node:child_process";
 import { Task, Run } from "@ai-collab/contracts";
 
@@ -35,13 +38,16 @@ export class GrokAdapter {
       assignedAgent: "grok",
     }, null, 2);
 
-    ctx.onLog?.(`[GrokAdapter]: 准备通过 stdin 发送任务载荷至 Grok (进程: ${this.grokBinary})...`);
+    ctx.onLog?.(`[GrokAdapter]: 准备以单轮方式启动 Grok (进程: ${this.grokBinary})...`);
     ctx.onLog?.(`[GrokAdapter]: 目标工作区: ${ctx.workspaceDir}`);
 
+    const promptPath = path.join(os.tmpdir(), `ai-collab-grok-${ctx.task.id}.txt`);
+    fs.writeFileSync(promptPath, taskPayload, { mode: 0o600 });
+
     return new Promise((resolve) => {
-      const args = process.env.GROK_ARGS 
+      const args = process.env.GROK_ARGS
         ? process.env.GROK_ARGS.split(" ")
-        : ["run", "--headless", "-"];
+        : ["--cwd", ctx.workspaceDir, "--prompt-file", promptPath, "--output-format", "plain", "--always-approve", "--no-alt-screen"];
 
       try {
         const isWin = process.platform === "win32";
@@ -54,19 +60,10 @@ export class GrokAdapter {
           },
           detached: !isWin,
           shell: false,
-          stdio: ["pipe", "pipe", "pipe"],
+          stdio: ["ignore", "pipe", "pipe"],
         });
 
         this.currentProcess = proc;
-
-        if (proc.stdin) {
-          proc.stdin.write(taskPayload, "utf-8", (err) => {
-            if (err) {
-              ctx.onLog?.(`[GrokAdapter]: stdin 写入警告: ${err.message}`);
-            }
-            proc.stdin?.end();
-          });
-        }
 
         proc.stdout?.on("data", (chunk: Buffer) => {
           const lines = chunk.toString().split("\n");
@@ -83,6 +80,7 @@ export class GrokAdapter {
 
         proc.on("error", (err: Error) => {
           this.currentProcess = null;
+          fs.rmSync(promptPath, { force: true });
           ctx.onLog?.(`[GrokAdapter 启动失败]: 未找到可执行文件 ${this.grokBinary} 或进程创建失败: ${err.message}`);
           resolve({
             success: false,
@@ -93,6 +91,7 @@ export class GrokAdapter {
 
         proc.on("close", (code, signal) => {
           this.currentProcess = null;
+          fs.rmSync(promptPath, { force: true });
           if (signal) {
             ctx.onLog?.(`[GrokAdapter]: 进程被外部信号终止 (${signal})`);
             resolve({
@@ -112,6 +111,7 @@ export class GrokAdapter {
           });
         });
       } catch (err) {
+        fs.rmSync(promptPath, { force: true });
         resolve({
           success: false,
           summary: `无法创建 Grok 进程: ${(err as Error).message}`,
