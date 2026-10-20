@@ -70,7 +70,7 @@ DATABASE_URL="postgresql://user:pass@127.0.0.1:5432/your_db" pnpm --filter @ai-c
 Each peer runs a local worker daemon connected to the Hub:
 
 ```bash
-# On Peer A machine (e.g. Grok):
+# On Peer A machine (e.g. Grok). Message listening is on by default.
 pnpm --filter @ai-collab/worker start \
   --type grok \
   --hub https://<your-hub-domain> \
@@ -91,32 +91,34 @@ Run the built-in diagnostic tool to verify environment and Hub connectivity:
 node scripts/doctor.mjs
 ```
 
-### 5. Automatic peer messages (Codex responder)
+### 5. Automatic peer messages
 
-Workers can now receive Hub `message_sent` events and automatically answer initial
-peer questions with a local Codex CLI. Enable this explicitly with
-`--listen-messages` alongside the normal task runner, or use `--messages-only`
-to send heartbeats and handle chat without claiming tasks or running Unity/UVCS.
-Both machines must run this version for automatic receiving on both ends.
+A normal Worker start listens for Hub `message_sent` events. Pass
+`--no-listen-messages` to claim tasks only. `--messages-only` keeps the heartbeat
+and the inbox, and does not claim tasks or run Unity/UVCS.
+
+Questions are handed to the current project session: Grok uses `grok --continue`
+in the workspace, and Codex uses `codex exec resume --last`. If that session does
+not exist, the Worker starts one new turn in the same workspace. Answers are sent
+back on the channel. A reply is delivered into the asking session and, when the
+task is `waiting_peer`, the task returns to the queue so the original Worker
+picks it up again. Replies do not generate another automatic peer message.
+Both machines must run this version.
 
 ```powershell
-# Terminal A: retain the Hub's existing grok routing role; actual chat executor is Codex.
-pnpm --filter @ai-collab/worker start --type grok --worker-id worker_grok_local --hub https://<your-hub-domain> --project <project_id> --messages-only
+# Terminal A and Terminal B use the same project workspace. Listening is already on.
+pnpm --filter @ai-collab/worker start --type grok --worker-id worker_grok_local --hub https://<your-hub-domain> --project <project_id> --workspace "/path/to/local/unity/workspace"
 
-# Terminal B: run on the other computer (stop its previous Worker before replacing it).
-pnpm --filter @ai-collab/worker start --type codex --worker-id worker_codex_local --hub https://<your-hub-domain> --project <project_id> --messages-only
+pnpm --filter @ai-collab/worker start --type codex --worker-id worker_codex_local --hub https://<your-hub-domain> --project <project_id> --workspace "/path/to/local/unity/workspace"
 ```
 
-Use your own Hub URL/project/Worker IDs. `--type` selects the **routing role**;
-the new message responder always uses Codex, including Terminal A's `grok` role.
-The existing task adapters are unchanged. Run only one message listener for each
-Hub/project/role. Stop any previous heartbeat bridge for the same Worker ID.
+Use your own Hub URL, project id, and Worker id. `--type` selects the routing role
+and which local session receives the message. Run only one listener for each
+Hub, project, and role. Stop any previous heartbeat bridge for the same Worker id.
 
-Prerequisites: install a current Codex CLI supporting `--ignore-user-config`,
-`--ephemeral`, and the `shell_tool`/`unified_exec` feature flags; sign in locally
-with `codex login`. `CODEX_BIN` can point to a native executable or the npm
-package's `@openai/codex/bin/codex.js`. Windows npm `codex.cmd` installations are
-resolved to that JS entry point without launching a command shell.
+Prerequisites: a signed-in `grok` CLI on the Grok machine (`GROK_BIN` optional)
+and a signed-in `codex` CLI on the Codex machine (`CODEX_BIN` optional). Windows
+npm `codex.cmd` shims are resolved to `@openai/codex/bin/codex.js`.
 
 Send questions using existing MCP `peer_ask` or `POST /api/messages`, with a real
 `taskId`, shared `threadId`, `fromAgent` and `toAgent`. Root messages have a null
@@ -142,14 +144,12 @@ Its local process lock prevents duplicate listeners on one machine. Hub reply
 deduplication also applies across machines, but simultaneous responders on two
 machines can still spend tokens twice; assign one receiver per role.
 
-Replies run in separate ephemeral CLI sessions in temporary directories with a
-read-only sandbox, shell execution and web search disabled, and user config
-ignored to avoid inheriting MCP tools/hooks. CLI authentication is retained.
-They use only task metadata and up to 20 messages from that thread, have no
-ongoing desktop-chat context, and do not inspect or edit the Unity workspace.
-Enable this mode only on a Hub whose senders you trust: each new root question
-can consume your local Codex quota. Ordinary task execution still follows the
-existing isolated-workspace pipeline.
+Delivery prefers the newest session for that workspace, so an already open Grok
+or Codex conversation receives the peer text. A missing session gets one new
+turn in the workspace instead of a throwaway read-only directory. Each new root
+question can consume local model quota. Ordinary task execution still follows
+the isolated-workspace pipeline. Grok task runs use `grok --prompt-file`, not
+`grok run --headless`.
 
 Offline validation after `pnpm install`:
 
