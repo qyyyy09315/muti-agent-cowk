@@ -33,8 +33,8 @@ test('loopback HTTP monitor degrades without config and rejects mutation/cross-s
   assert.equal((await fetch(url+'/api/snapshot',{headers:{Origin:'https://other.example'}})).status,403);
   const status=await new Promise((resolve,reject)=>{const req=http.get(url+'/api/snapshot',{headers:{Host:'other.example'}},res=>{res.resume();resolve(res.statusCode)});req.on('error',reject)});assert.equal(status,403);
   assert.equal((await fetch(url+'/missing')).status,404);
-  const html=await fetch(url+'/');assert.match(html.headers.get('content-security-policy'),/frame-ancestors 'none'/);assert.match(await html.text(),/协作运行台/);
-  assert.match(await(await fetch(url+'/style.css')).text(),/color-scheme:light/);
+  const html=await fetch(url+'/');assert.match(html.headers.get('content-security-policy'),/frame-ancestors 'none'/);assert.match(await html.text(),/ai-collab-monitor[\s\S]*read-only/i);
+  assert.match(await(await fetch(url+'/style.css')).text(),/color-scheme:\s*dark/);
  }finally{await service.stop();fs.rmSync(profile,{recursive:true,force:true});}
 });
 test('Windows collector reads mock Hub GET APIs, configured identity and messages without leaking token',{skip:process.platform!=='win32',timeout:20000},async()=>{

@@ -97,9 +97,9 @@ async function poll(force=false){
  finally{busy=false;$('refresh').disabled=false;}
 }
 $('refresh').onclick=()=>poll(true);
-$('pause').onclick=()=>{paused=!paused;$('pause').textContent=paused?'恢复刷新':'暂停刷新';if(snapshot)render(snapshot);if(!paused)poll(true);};
+$('pause').onclick=()=>{paused=!paused;$('pause').textContent=paused?'resume':'pause';if(snapshot)render(snapshot);if(!paused)poll(true);};
 $('message-filter').onchange=()=>{if(snapshot)renderMessages();};
 $('log-filter').oninput=renderTerminal;
 document.querySelectorAll('[data-tab]').forEach(button=>{button.onclick=()=>{tab=button.dataset.tab;document.querySelectorAll('[data-tab]').forEach(b=>b.setAttribute('aria-selected',String(b===button)));renderTerminal();};button.onkeydown=e=>{if(e.key!=='ArrowRight'&&e.key!=='ArrowLeft')return;const tabs=[...document.querySelectorAll('[data-tab]')],index=tabs.indexOf(button),next=tabs[(index+(e.key==='ArrowRight'?1:tabs.length-1))%tabs.length];next.focus();next.click();};});
-$('copy').onclick=async()=>{try{await navigator.clipboard.writeText(terminalText);$('copy').textContent='已复制';}catch{$('copy').textContent='复制失败，请选中文本';}setTimeout(()=>{$('copy').textContent='复制当前内容';},1800);};
+$('copy').onclick=async()=>{try{await navigator.clipboard.writeText(terminalText);$('copy').textContent='copied';}catch{$('copy').textContent='copy failed';}setTimeout(()=>{$('copy').textContent='copy';},1800);};
 poll();setInterval(()=>poll(),2000);

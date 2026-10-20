@@ -1,27 +1,122 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>协作运行台</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ai-collab monitor</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
 <body>
-<aside><a class="brand" href="/">C<span>协作运行台</span></a><div class="sidebar-label">本机工作区</div><div class="project-name">尚未配置<span>等待读取本机配置</span></div><nav><a href="#overview">运行概览</a><a href="#messages-panel">协作消息</a><a href="#terminal-panel">CLI 与日志</a><a href="#details">连接信息</a></nav><div class="sidebar-foot"><span class="dot"></span>本机只读监视<br><small>不发送消息 · 不修改任务</small></div></aside>
-<main>
-<header><div><div class="eyebrow">AI COLLAB / LOCAL OBSERVABILITY</div><h1>协作运行台</h1><p>从心跳到回复，看见每一步。</p></div><div class="header-right"><div id="refresh-state" role="status">正在连接本机服务…</div><div><button id="refresh">立即刷新</button><button id="pause">暂停刷新</button></div></div></header>
-<div id="alerts" role="status"></div>
-<section id="overview" class="metrics" aria-label="运行状态">
- <article><div class="metric-label">WORKER</div><div id="worker-status" class="metric-value">采集中</div><div id="worker-detail" class="metric-detail">等待实际进程与 Hub 核验</div></article>
- <article><div class="metric-label">CODEX CLI</div><div id="cli-status" class="metric-value">—</div><div id="cli-detail" class="metric-detail">仅识别 Worker 的子进程</div></article>
- <article><div class="metric-label">消息监听</div><div id="inbox-status" class="metric-value">—</div><div id="inbox-detail" class="metric-detail">等待收件游标</div></article>
- <article><div class="metric-label">HUB 连接</div><div id="hub-status" class="metric-value">—</div><div id="hub-detail" class="metric-detail">等待远端快照</div></article>
-</section>
-<div class="content-grid">
- <section class="panel" id="messages-panel"><div class="panel-head"><div><span class="eyebrow">CONVERSATION</span><h2>协作消息 <span id="message-count" class="count">0</span></h2></div><select id="message-filter" aria-label="筛选协作消息"><option value="all">全部消息</option><option value="in">仅收到</option><option value="out">仅发出</option></select></div><div id="messages" class="messages"><div class="empty">正在读取 Hub 消息…</div></div><div class="panel-note">显示 Hub 已保存的消息；未收到新的消息时，不会伪造测试回复。</div></section>
- <section class="panel" id="tasks-panel"><div class="panel-head"><div><span class="eyebrow">WORK IN PROGRESS</span><h2>任务与进程</h2></div><span id="task-count" class="count">0</span></div><div id="tasks" class="tasks"><div class="empty">等待任务快照…</div></div><div class="subsection"><h3>本机进程树</h3><div id="processes"></div></div><div class="panel-note" id="phase">暂无流水线记录</div></section>
+<div class="app">
+  <header class="winbar">
+    <div class="traffic" aria-hidden="true"><i></i><i></i><i></i></div>
+    <div class="win-title">ai-collab-monitor <span>— 本机只读</span></div>
+    <div id="refresh-state" class="win-status" role="status">正在连接本机服务…</div>
+  </header>
+
+  <main class="shell">
+    <div class="prompt-line">
+      <span class="prompt">$</span>
+      <span class="prompt-cmd">ai-collab monitor --read-only</span>
+      <span class="prompt-note">不发送消息 · 不修改任务 · 凭据不进入页面</span>
+    </div>
+
+    <div class="toolbar">
+      <div class="project-name">尚未配置<span>等待读取本机配置</span></div>
+      <div class="actions">
+        <button id="refresh" type="button">refresh</button>
+        <button id="pause" type="button">pause</button>
+      </div>
+    </div>
+
+    <div id="alerts" role="status"></div>
+
+    <section id="overview" class="kv-grid" aria-label="运行状态">
+      <div class="kv">
+        <span class="k">WORKER</span>
+        <span id="worker-status" class="metric-value">采集中</span>
+        <span id="worker-detail" class="metric-detail">等待实际进程与 Hub 核验</span>
+      </div>
+      <div class="kv">
+        <span class="k">CLI</span>
+        <span id="cli-status" class="metric-value">—</span>
+        <span id="cli-detail" class="metric-detail">仅识别 Worker 的子进程</span>
+      </div>
+      <div class="kv">
+        <span class="k">INBOX</span>
+        <span id="inbox-status" class="metric-value">—</span>
+        <span id="inbox-detail" class="metric-detail">等待收件游标</span>
+      </div>
+      <div class="kv">
+        <span class="k">HUB</span>
+        <span id="hub-status" class="metric-value">—</span>
+        <span id="hub-detail" class="metric-detail">等待远端快照</span>
+      </div>
+    </section>
+
+    <div class="content-grid">
+      <section class="block" id="messages-panel">
+        <div class="block-head">
+          <span class="block-title">conversation <span id="message-count" class="count">0</span></span>
+          <select id="message-filter" aria-label="筛选协作消息">
+            <option value="all">all</option>
+            <option value="in">inbound</option>
+            <option value="out">outbound</option>
+          </select>
+        </div>
+        <div id="messages" class="messages"><div class="empty">正在读取 Hub 消息…</div></div>
+        <div class="block-note">仅显示 Hub 已保存的消息，不伪造测试回复。</div>
+      </section>
+
+      <section class="block" id="tasks-panel">
+        <div class="block-head">
+          <span class="block-title">tasks <span id="task-count" class="count">0</span></span>
+        </div>
+        <div id="tasks" class="tasks"><div class="empty">等待任务快照…</div></div>
+        <div class="subsection">
+          <h3>LOCAL PROCESSES</h3>
+          <div id="processes"></div>
+        </div>
+        <div class="block-note" id="phase">暂无流水线记录</div>
+      </section>
+    </div>
+
+    <section class="block" id="terminal-panel">
+      <div class="block-head">
+        <span class="block-title">logs &amp; session</span>
+        <div class="terminal-controls">
+          <label><input id="autoscroll" type="checkbox" checked> follow</label>
+          <button id="copy" type="button">copy</button>
+        </div>
+      </div>
+      <div class="tabs" role="tablist" aria-label="运行内容">
+        <button role="tab" aria-selected="true" data-tab="session">session</button>
+        <button role="tab" aria-selected="false" data-tab="stdout">stdout</button>
+        <button role="tab" aria-selected="false" data-tab="stderr">stderr</button>
+        <button role="tab" aria-selected="false" data-tab="events">events</button>
+      </div>
+      <div class="terminal-toolbar">
+        <span id="terminal-description">读取此 Worker 专属的会话记录</span>
+        <input id="log-filter" type="search" placeholder="filter…" aria-label="筛选日志或对话">
+      </div>
+      <pre id="terminal" tabindex="0">正在采集…</pre>
+      <div id="terminal-source" class="block-note"></div>
+    </section>
+
+    <section class="block" id="details">
+      <div class="block-head">
+        <span class="block-title">connection</span>
+        <span class="badge neutral">read-only</span>
+      </div>
+      <dl id="connection-details"></dl>
+    </section>
+
+    <footer>
+      <span>仅监听 127.0.0.1 · 每 2 秒刷新 · 本机与 Hub 每 5 秒采集</span>
+      <span id="footer-time"></span>
+    </footer>
+  </main>
 </div>
-<section class="panel terminal-panel" id="terminal-panel">
- <div class="panel-head"><div><span class="eyebrow">RUNTIME INSPECTOR</span><h2>CLI 与日志</h2></div><div class="terminal-controls"><label><input id="autoscroll" type="checkbox" checked>跟随末尾</label><button id="copy">复制当前内容</button></div></div>
- <div class="tabs" role="tablist" aria-label="运行内容"><button role="tab" aria-selected="true" data-tab="session">CLI 对话</button><button role="tab" aria-selected="false" data-tab="stdout">Worker 日志</button><button role="tab" aria-selected="false" data-tab="stderr">错误日志</button><button role="tab" aria-selected="false" data-tab="events">Hub 事件</button></div>
- <div class="terminal-toolbar"><span id="terminal-description">读取此 Worker 专属的会话记录</span><input id="log-filter" type="search" placeholder="筛选当前内容…" aria-label="筛选日志或对话"></div><pre id="terminal" tabindex="0">正在采集…</pre><div id="terminal-source" class="panel-note"></div>
-</section>
-<section class="panel details-panel" id="details"><div class="panel-head"><div><span class="eyebrow">CONNECTION DETAILS</span><h2>连接与文件来源</h2></div><span class="badge neutral">只读</span></div><dl id="connection-details"></dl></section>
-<footer>仅监听 127.0.0.1 · 浏览器每 2 秒刷新，本机与 Hub 每 5 秒采集 · 凭据不进入页面 <span id="footer-time"></span></footer>
-</main>
-</body></html>
+</body>
+</html>
