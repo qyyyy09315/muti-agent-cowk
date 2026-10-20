@@ -92,9 +92,16 @@
       background: #1e293b; color: #cbd5e1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
       font-size: 0.78rem; padding: 14px; border-radius: 8px; height: 320px; overflow-y: auto; line-height: 1.6;
     }
-    .log-row { margin-bottom: 4px; word-break: break-all; }
-    .log-time { color: #64748b; margin-right: 8px; }
-    .log-ev { color: #38bdf8; font-weight: 600; margin-right: 8px; }
+    .log-row { margin-bottom: 6px; word-break: break-word; line-height: 1.55; }
+    .log-time { color: #64748b; margin-right: 8px; font-variant-numeric: tabular-nums; }
+    .log-icon { display: inline-block; width: 1.1em; margin-right: 6px; font-weight: 700; }
+    .log-title { color: #e2e8f0; font-weight: 600; margin-right: 6px; }
+    .log-detail { color: #94a3b8; }
+    .log-row.tone-info .log-icon { color: #38bdf8; }
+    .log-row.tone-ok .log-icon { color: #34d399; }
+    .log-row.tone-warn .log-icon { color: #fbbf24; }
+    .log-row.tone-error .log-icon { color: #f87171; }
+    .log-row.tone-msg .log-icon { color: #a78bfa; }
 
     /* 消息气泡样式 */
     .msg-list { max-height: 320px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; padding-right: 6px; overscroll-behavior: contain; }
@@ -427,6 +434,7 @@
       try {
         const res = await fetch("/api/workers");
         const workers = await res.json();
+        (workers || []).forEach(w => workerIndex.set(w.id, w));
         updateWorkerUI("grok", workers.find(w => w.agentType === "grok"));
         updateWorkerUI("codex", workers.find(w => w.agentType === "codex"));
       } catch(e) {}
@@ -457,6 +465,8 @@
         const url = activeProjectId === "__ALL__" ? "/api/tasks" : `/api/projects/${activeProjectId}/tasks`;
         const res = await fetch(url);
         const tasks = await res.json();
+        taskIndex.clear();
+        (tasks || []).forEach(t => taskIndex.set(t.id, t));
         const tbody = document.getElementById("task-tbody");
 
         if (!tasks || tasks.length === 0) {
@@ -627,6 +637,121 @@
       alert("急停指令已下发！");
     }
 
+    // ---- 事件转人类可读中文摘要 ----
+    const taskIndex = new Map();   // 任务 id -> 任务对象
+    const workerIndex = new Map(); // Worker id -> Worker 对象
+
+    const STATE_LABELS = {
+      queued: "排队中", leased: "已领取", running: "执行中", submitted: "已提交",
+      reviewing: "审查中", completed: "已完成", needs_changes: "需修改",
+      waiting_peer: "等待对端", waiting_human: "等待人工", paused: "已暂停",
+      failed: "失败", cancelled: "已取消",
+    };
+
+    function stateLabel(state) {
+      if (!state) return "未知状态";
+      return STATE_LABELS[state] || state;
+    }
+
+    function agentLabel(agent) {
+      if (agent === "grok") return "Grok";
+      if (agent === "codex") return "Codex";
+      if (agent === "unassigned") return "自动分配";
+      return agent || "未知";
+    }
+
+    function workerLabel(id) {
+      if (!id) return "某端";
+      const w = workerIndex.get(id);
+      if (w) return `${agentLabel(w.agentType)}（${w.hostname || "本机"}）`;
+      if (String(id).includes("grok")) return "Grok 端";
+      if (String(id).includes("codex")) return "Codex 端";
+      return String(id);
+    }
+
+    function taskLabel(id) {
+      if (!id) return "未知任务";
+      const t = taskIndex.get(id);
+      if (t && t.title) return `「${t.title}」`;
+      return `任务 ${String(id).slice(-6)}`;
+    }
+
+    function clockOf(value) {
+      if (!value) return "";
+      const d = new Date(value);
+      return Number.isNaN(d.getTime()) ? "" : d.toLocaleTimeString();
+    }
+
+    function clipText(text, max = 60) {
+      const s = String(text == null ? "" : text).replace(/\s+/g, " ").trim();
+      if (!s) return "";
+      return s.length > max ? s.slice(0, max) + "…" : s;
+    }
+
+    function summarizeEvent(ev) {
+      const p = ev.payload || {};
+      switch (ev.type) {
+        case "task_created": {
+          const task = p.task || p;
+          return { icon: "＋", title: "任务创建", tone: "info",
+            detail: `${taskLabel(task.id || ev.taskId)}，指派 ${agentLabel(task.assignedAgent)}` };
+        }
+        case "task_state_changed":
+          return { icon: "→", title: "状态变更", tone: "info",
+            detail: `${taskLabel(p.taskId || ev.taskId)}：${stateLabel(p.from)} → ${stateLabel(p.to)}` };
+        case "task_leased":
+          return { icon: "⚡", title: "任务领取", tone: "info",
+            detail: `${workerLabel(p.workerId)} 领取 ${taskLabel(p.taskId || ev.taskId)}，租约至 ${clockOf(p.expiresAt)}` };
+        case "task_lease_reaped":
+          return { icon: "⏱", title: "租约超时", tone: p.requeued ? "warn" : "error",
+            detail: `${taskLabel(p.taskId || ev.taskId)} ${p.requeued ? "已重新排队等待重试" : `已熔断：${clipText(p.reason, 50)}`}` };
+        case "task_run_failed":
+          return { icon: "✖", title: "执行失败", tone: p.requeued ? "warn" : "error",
+            detail: `${taskLabel(p.taskId || ev.taskId)} ${p.requeued ? "已重新排队" : "已达重试上限并终止"}：${clipText(p.reason, 60)}` };
+        case "run_submitted":
+          return { icon: "✔", title: "成果提交", tone: "ok",
+            detail: `${taskLabel(p.taskId || ev.taskId)} ${clipText(p.summary, 60)}` };
+        case "message_sent": {
+          const m = p.message || p;
+          const from = agentLabel(m.fromAgent || m.from);
+          const to = agentLabel(m.toAgent || m.to);
+          return { icon: "💬", title: "协同消息", tone: "msg",
+            detail: `${from} ➔ ${to}${m.replyToId ? "（答复）" : ""}：${clipText(m.content, 70)}` };
+        }
+        case "approval_requested":
+          return { icon: "⚠", title: "待人工审批", tone: "warn",
+            detail: clipText(p.approval?.description || p.description, 60) };
+        case "approval_decided":
+          return { icon: "✔", title: "审批结果", tone: p.decision === "approved" ? "ok" : "error",
+            detail: `${p.decision === "approved" ? "已批准" : "已拒绝"}（${p.decidedBy || "管理员"}）` };
+        case "artifact_saved":
+          return { icon: "📎", title: "产物归档", tone: "ok", detail: clipText(p.artifact?.path, 60) };
+        default:
+          if (ev.type && ev.type.startsWith("a2a_")) {
+            return { icon: "⇄", title: "A2A 会话", tone: "msg",
+              detail: clipText(ev.type.replace("a2a_", "") + "：" + JSON.stringify(p), 70) };
+          }
+          return { icon: "•", title: ev.type || "事件", tone: "info", detail: clipText(JSON.stringify(p), 70) };
+      }
+    }
+
+    function appendEventRow(ev) {
+      const logBox = document.getElementById("event-log");
+      if (!logBox) return;
+      const s = summarizeEvent(ev);
+      const row = document.createElement("div");
+      row.className = `log-row tone-${s.tone}`;
+      row.title = JSON.stringify(ev); // 悬停可查看原始 JSON，便于排查
+      row.innerHTML =
+        `<span class="log-time">[${new Date(ev.createdAt).toLocaleTimeString()}]</span>` +
+        `<span class="log-icon">${s.icon}</span>` +
+        `<span class="log-title">${escapeHtml(s.title)}</span>` +
+        `<span class="log-detail">${escapeHtml(s.detail)}</span>`;
+      logBox.appendChild(row);
+      while (logBox.childElementCount > 200) logBox.removeChild(logBox.firstElementChild);
+      if (isNearBottom(logBox)) logBox.scrollTop = logBox.scrollHeight;
+    }
+
     function initSse() {
       if (sseReconnectTimer) {
         clearTimeout(sseReconnectTimer);
@@ -672,16 +797,7 @@
           if (id > lastEventCursor) lastEventCursor = id;
         }
 
-        const logBox = document.getElementById("event-log");
-        if (logBox) {
-          const row = document.createElement("div");
-          row.className = "log-row";
-          row.innerHTML = `<span class="log-time">[${new Date(ev.createdAt).toLocaleTimeString()}]</span><span class="log-ev">#${ev.id} ${ev.type}</span>${escapeHtml(JSON.stringify(ev.payload))}`;
-          logBox.appendChild(row);
-          while (logBox.childElementCount > 200) logBox.removeChild(logBox.firstElementChild);
-          const atBottom = isNearBottom(logBox);
-          if (atBottom) logBox.scrollTop = logBox.scrollHeight;
-        }
+        appendEventRow(ev);
 
         // 核心联动：事件触发时实时刷新流水线与对话流
         if (ev.type && ev.type.includes("message")) fetchMessages();
