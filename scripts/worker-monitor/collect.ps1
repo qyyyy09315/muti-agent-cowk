@@ -40,11 +40,20 @@ try {
  }
  $headers=@{Authorization=('Bearer '+$token)}
  $base=$cfg.hubUrl.TrimEnd('/')
- $workers=Invoke-RestMethod ($base+'/api/workers') -Headers $headers -TimeoutSec 4 -MaximumRedirection 0
- $result.workers=@($workers|ForEach-Object {[ordered]@{id=$_.id;agentType=$_.agentType;hostname=$_.hostname;status=$_.status;lastHeartbeatAt=$_.lastHeartbeatAt;version=$_.version}})
- $result.hubOk=$true
- try{$tasks=Invoke-RestMethod ($base+'/api/projects/'+[Uri]::EscapeDataString($cfg.projectId)+'/tasks') -Headers $headers -TimeoutSec 4 -MaximumRedirection 0;$result.tasks=@($tasks|ForEach-Object {$_})}catch{$result.errors+=('任务读取失败：'+$_.Exception.Message)}
- try{$events=Invoke-RestMethod ($base+'/api/events?projectId='+[Uri]::EscapeDataString($cfg.projectId)+'&after='+$AfterEvent) -Headers $headers -TimeoutSec 4 -MaximumRedirection 0;$result.events=@($events|ForEach-Object {$_})}catch{$result.errors+=('事件读取失败：'+$_.Exception.Message)}
+ $denied=$false
+ try{
+  $workers=Invoke-RestMethod ($base+'/api/workers') -Headers $headers -TimeoutSec 4 -MaximumRedirection 0
+  $result.workers=@($workers|ForEach-Object {[ordered]@{id=$_.id;agentType=$_.agentType;hostname=$_.hostname;status=$_.status;lastHeartbeatAt=$_.lastHeartbeatAt;version=$_.version}})
+  $result.hubOk=$true
+ }catch{
+  $code=$_.Exception.Response.StatusCode.value__
+  if($code -eq 401 -or $code -eq 403){$denied=$true}else{$result.hubError=$_.Exception.Message}
+ }
+ try{$tasks=Invoke-RestMethod ($base+'/api/projects/'+[Uri]::EscapeDataString($cfg.projectId)+'/tasks') -Headers $headers -TimeoutSec 4 -MaximumRedirection 0;$result.tasks=@($tasks|ForEach-Object {$_});$result.hubOk=$true}catch{
+  $code=$_.Exception.Response.StatusCode.value__
+  if($code -eq 401 -or $code -eq 403){$denied=$true}else{$result.errors+=('任务读取失败：'+$_.Exception.Message)}
+ }
+ try{$events=Invoke-RestMethod ($base+'/api/events?projectId='+[Uri]::EscapeDataString($cfg.projectId)+'&after='+$AfterEvent) -Headers $headers -TimeoutSec 4 -MaximumRedirection 0;$result.events=@($events|ForEach-Object {$_});$result.hubOk=$true}catch{$result.errors+=('事件读取失败：'+$_.Exception.Message)}
  try{
   $messages=Invoke-RestMethod ($base+'/api/projects/'+[Uri]::EscapeDataString($cfg.projectId)+'/messages?limit=100') -Headers $headers -TimeoutSec 4 -MaximumRedirection 0
   $result.messages=@($messages|ForEach-Object {$_})
@@ -53,8 +62,11 @@ try {
    foreach($task in @($result.tasks|Sort-Object updatedAt -Descending|Select-Object -First 12)){
     try{$messages=Invoke-RestMethod ($base+'/api/tasks/'+[Uri]::EscapeDataString($task.id)+'/messages') -Headers $headers -TimeoutSec 3 -MaximumRedirection 0;$result.messages+=@($messages|ForEach-Object {$_})}catch{$result.errors+=('消息读取失败 '+$task.id)}
    }
+  }elseif($_.Exception.Response.StatusCode.value__ -eq 401 -or $_.Exception.Response.StatusCode.value__ -eq 403){
+   $denied=$true
   }else{$result.errors+=('消息读取失败：'+$_.Exception.Message)}
  }
+ if($denied){$result.hubError='令牌权限不足：监视台需要个人令牌（控制台 → 令牌，创建时不要绑定 Agent）。Agent 令牌只能读取事件流。'}
 }catch{$result.hubError=$_.Exception.Message}
 finally{$token=$null;$headers=$null}
 $result|ConvertTo-Json -Depth 18 -Compress

@@ -44,7 +44,7 @@ Worker CLI本身不自动创建这些监视文件，需要由本机启动配置�
 
 agentType支持codex/grok（默认codex）。projectName、sourceCommit、messageModel为可选展示字段。Hub允许HTTPS或回环HTTP，拒绝URL内嵌凭据，不携带认证头跟随重定向。
 
-凭据优先读取启动环境HUB_TOKEN，否则读取配置目录的hub-token.dpapi。DPAPI文件由同一Windows用户生成：
+凭据优先读取启动环境HUB_TOKEN，否则读取配置目录的hub-token.dpapi。这里必须使用**个人令牌**（控制台 → 令牌，创建时不要绑定 Agent）：监视台要读取 Worker 列表、项目任务与消息，这些属于用户级读接口；Agent 令牌只能读事件流，会得到 403。DPAPI文件由同一Windows用户生成：
 
 ```powershell
 $secureToken = Read-Host 'Hub token' -AsSecureString
