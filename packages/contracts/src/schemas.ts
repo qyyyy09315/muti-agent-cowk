@@ -62,10 +62,19 @@ export const TaskSchema = z.object({
   budget: TaskBudgetSchema.default({}),
   currentAttempt: z.number().int().nonnegative().default(0),
   version: z.number().int().nonnegative().default(1),
+  createdBy: z.string().nullable().optional(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
 });
 export type Task = z.infer<typeof TaskSchema>;
+
+// ================= 鉴权与 Token =================
+
+export const CreateTokenInputSchema = z.object({
+  label: z.string().trim().min(1).max(100),
+  agentId: z.string().trim().min(1).max(64).optional(),
+});
+export type CreateTokenInput = z.infer<typeof CreateTokenInputSchema>;
 
 export const RunSchema = z.object({
   id: z.string().min(1),

@@ -14,6 +14,17 @@ import {
   ErrorCode,
 } from "@ai-collab/contracts";
 
+export type StoredApiToken = {
+  id: string;
+  userId: string;
+  agentId: string | null;
+  label: string;
+  tokenHash: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+};
+
 export interface StorageEngine {
   init(): Promise<void>;
   close(): Promise<void>;
@@ -71,6 +82,14 @@ export interface StorageEngine {
   // Users & Auth (离线管理员注册，无公开注册入口)
   createUser(user: { id: string; username: string; passwordHash: string; role?: "admin" | "member"; createdAt?: string }): Promise<{ id: string; username: string; passwordHash: string; role: "admin" | "member"; createdAt: string }>;
   getUserByUsername(username: string): Promise<{ id: string; username: string; passwordHash: string; role: "admin" | "member"; createdAt: string } | null>;
+  getUserById(id: string): Promise<{ id: string; username: string; passwordHash: string; role: "admin" | "member"; createdAt: string } | null>;
+
+  // API Token（只存哈希）
+  createApiToken(token: StoredApiToken): Promise<StoredApiToken>;
+  getApiTokenByHash(hash: string): Promise<StoredApiToken | null>;
+  listApiTokens(userId: string): Promise<StoredApiToken[]>;
+  revokeApiToken(id: string, userId: string): Promise<boolean>;
+  touchApiToken(id: string): Promise<void>;
 
   // A2A Agent-to-Agent Envelope
   saveA2AEnvelope(envelope: any): Promise<{ envelope: any; duplicate: boolean }>;

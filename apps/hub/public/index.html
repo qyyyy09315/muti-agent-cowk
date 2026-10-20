@@ -189,6 +189,7 @@
     </div>
     <div style="display: flex; gap: 10px; align-items: center;">
       <span id="user-display" style="font-size: 0.85rem; color: var(--muted); margin-right: 6px;"></span>
+      <button class="btn btn-ghost" onclick="openTokenModal()">API 令牌</button>
       <button class="btn btn-ghost" onclick="openNewTaskModal()">+ 新建任务</button>
       <button class="btn btn-danger" onclick="triggerEmergencyStop()">急停任务</button>
       <button class="btn btn-ghost btn-sm" onclick="handleLogout()">退出</button>
@@ -300,6 +301,33 @@
     </div>
   </div>
 
+  <!-- API 令牌管理 -->
+  <div class="modal-overlay" id="token-modal">
+    <div class="modal" style="width: 560px;">
+      <h3 style="font-size: 1rem; margin-bottom: 6px;">API 令牌</h3>
+      <p style="font-size: 0.78rem; color: var(--muted); margin-bottom: 14px;">
+        用于 Worker 或脚本接入。明文只在创建时显示一次，服务端仅保存哈希。
+      </p>
+      <div class="form-group">
+        <label class="form-label">用途标签</label>
+        <input class="form-input" id="token-label" placeholder="例如：主机名 Worker" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">绑定 Agent（可选）</label>
+        <input class="form-input" id="token-agent" list="agent-options" placeholder="例如 codex-b；留空则为个人令牌" />
+      </div>
+      <div style="display: flex; justify-content: flex-end; gap: 10px;">
+        <button class="btn btn-ghost" onclick="closeTokenModal()">关闭</button>
+        <button class="btn btn-solid" onclick="createToken()">生成令牌</button>
+      </div>
+      <div id="token-created" style="display: none; margin-top: 14px; padding: 10px 12px; border: 1px solid #fde68a; background: #fffbeb; border-radius: 6px;">
+        <p style="font-size: 0.78rem; color: #92400e; margin-bottom: 6px;">请立即复制并妥善保存，关闭后无法再次查看：</p>
+        <code id="token-plain" style="display: block; font-size: 0.78rem; word-break: break-all;"></code>
+      </div>
+      <div id="token-list" style="margin-top: 16px; max-height: 220px; overflow-y: auto;"></div>
+    </div>
+  </div>
+
   <script>
     let activeProjectId = "__ALL__";
     let projectsList = [];
@@ -309,13 +337,28 @@
     let lastEventCursor = 0;
     let sseSeen = new Set();
 
+    // 统一请求：自动附带会话 Token；401 时回到登录页
+    async function apiFetch(url, options = {}) {
+      const headers = { ...(options.headers || {}) };
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+      const res = await apiFetch(url, { ...options, headers });
+      if (res.status === 401) {
+        localStorage.removeItem("collab_token");
+        token = null;
+        const overlay = document.getElementById("login-overlay");
+        if (overlay) overlay.style.display = "flex";
+        throw new Error("登录已失效，请重新登录");
+      }
+      return res;
+    }
+
     async function checkAuth() {
       if (!token) {
         document.getElementById("login-overlay").style.display = "flex";
         return;
       }
       try {
-        const res = await fetch("/api/auth/me", { headers: { "Authorization": `Bearer ${token}` } });
+        const res = await apiFetch("/api/auth/me", { headers: { "Authorization": `Bearer ${token}` } });
         if (res.ok) {
           const data = await res.json();
           document.getElementById("login-overlay").style.display = "none";
@@ -368,7 +411,7 @@
     // 1. 初始化项目列表并建立下拉选择器
     async function loadProjects() {
       try {
-        const res = await fetch("/api/projects");
+        const res = await apiFetch("/api/projects");
         projectsList = await res.json();
         const selector = document.getElementById("project-selector");
         const modalSelect = document.getElementById("task-modal-project");
@@ -423,7 +466,7 @@
         return;
       }
 
-      const res = await fetch("/api/tasks", {
+      const res = await apiFetch("/api/tasks", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ projectId, title, goal, acceptanceCriteria, assignedAgent }),
@@ -438,7 +481,7 @@
 
     async function fetchWorkers() {
       try {
-        const res = await fetch("/api/workers");
+        const res = await apiFetch("/api/workers");
         const workers = await res.json();
         (workers || []).forEach(w => workerIndex.set(w.id, w));
         renderAgents(workers);
@@ -505,7 +548,7 @@
     async function fetchTasks() {
       try {
         const url = activeProjectId === "__ALL__" ? "/api/tasks" : `/api/projects/${activeProjectId}/tasks`;
-        const res = await fetch(url);
+        const res = await apiFetch(url);
         const tasks = await res.json();
         taskIndex.clear();
         (tasks || []).forEach(t => taskIndex.set(t.id, t));
@@ -539,7 +582,7 @@
     }
 
     async function taskAction(id, action) {
-      await fetch(`/api/tasks/${id}/actions`, {
+      await apiFetch(`/api/tasks/${id}/actions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action }),
@@ -577,7 +620,7 @@
     async function fetchMessages(force = false) {
       try {
         const url = activeProjectId === "__ALL__" ? "/api/messages?limit=50" : `/api/projects/${activeProjectId}/messages?limit=50`;
-        const res = await fetch(url);
+        const res = await apiFetch(url);
         const messages = await res.json();
         const container = document.getElementById("messages-container");
         if (!container) return;
@@ -635,7 +678,7 @@
     async function fetchApprovals() {
       try {
         const url = activeProjectId === "__ALL__" ? `/api/projects/proj_lanzhou_landmarks/approvals?status=pending` : `/api/projects/${activeProjectId}/approvals?status=pending`;
-        const res = await fetch(url);
+        const res = await apiFetch(url);
         const approvals = await res.json();
         const container = document.getElementById("approvals-container");
         if (!approvals || approvals.length === 0) {
@@ -659,7 +702,7 @@
     }
 
     async function decideApproval(id, decision) {
-      await fetch(`/api/approvals/${id}/decision`, {
+      await apiFetch(`/api/approvals/${id}/decision`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ decision }),
@@ -670,7 +713,7 @@
     async function triggerEmergencyStop() {
       if (!confirm("确定触发任务急停吗？正在运行的任务将被取消！")) return;
       const url = activeProjectId === "__ALL__" ? "/api/tasks" : `/api/projects/${activeProjectId}/tasks`;
-      const res = await fetch(url);
+      const res = await apiFetch(url);
       const tasks = await res.json();
       for (const t of tasks) {
         if (t.state === 'running' || t.state === 'leased' || t.state === 'waiting_peer') {
@@ -813,7 +856,7 @@
         return;
       }
 
-      const source = new EventSource(`/api/events?projectId=${encodeURIComponent(sseProject)}&stream=1&after=${lastEventCursor}`);
+      const source = new EventSource(`/api/events?projectId=${encodeURIComponent(sseProject)}&stream=1&after=${lastEventCursor}${token ? `&token=${encodeURIComponent(token)}` : ""}`);
       sseSource = source;
 
       source.onopen = () => {
@@ -860,6 +903,60 @@
           }, 3000);
         }
       };
+    }
+
+    // ---- API 令牌管理 ----
+    function openTokenModal() {
+      document.getElementById("token-modal").style.display = "flex";
+      document.getElementById("token-created").style.display = "none";
+      loadTokens();
+    }
+    function closeTokenModal() {
+      document.getElementById("token-modal").style.display = "none";
+    }
+    async function loadTokens() {
+      const box = document.getElementById("token-list");
+      box.textContent = "正在读取...";
+      try {
+        const res = await apiFetch("/api/tokens");
+        if (!res.ok) { box.textContent = "读取失败"; return; }
+        const list = await res.json();
+        if (!list.length) { box.innerHTML = '<p style="font-size:0.8rem;color:var(--muted)">还没有令牌</p>'; return; }
+        box.innerHTML = list.map(t => `
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--line);">
+            <div style="min-width:0">
+              <div style="font-size:0.85rem;font-weight:600;">${escapeHtml(t.label)}</div>
+              <div style="font-size:0.72rem;color:var(--muted);word-break:break-all;">
+                ${t.agentId ? "Agent: " + escapeHtml(t.agentId) : "个人令牌"} ·
+                ${t.revoked ? "已吊销" : "有效"}${t.lastUsedAt ? " · 最近使用 " + new Date(t.lastUsedAt).toLocaleString() : ""}
+              </div>
+            </div>
+            ${t.revoked ? "" : `<button class="btn btn-danger btn-sm" onclick="revokeToken('${t.id}')">吊销</button>`}
+          </div>`).join("");
+      } catch (e) {
+        box.textContent = "读取失败";
+      }
+    }
+    async function createToken() {
+      const label = document.getElementById("token-label").value.trim();
+      const agentId = document.getElementById("token-agent").value.trim();
+      if (!label) { alert("请填写用途标签"); return; }
+      const res = await apiFetch("/api/tokens", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ label, agentId: agentId || undefined }),
+      });
+      const data = await res.json();
+      if (!res.ok) { alert(data.error || "创建失败"); return; }
+      document.getElementById("token-created").style.display = "block";
+      document.getElementById("token-plain").textContent = data.token;
+      document.getElementById("token-label").value = "";
+      loadTokens();
+    }
+    async function revokeToken(id) {
+      if (!confirm("吊销后使用该令牌的 Worker 将立即失效，确定继续？")) return;
+      await apiFetch(`/api/tokens/${id}`, { method: "DELETE" });
+      loadTokens();
     }
 
     function escapeHtml(str) {

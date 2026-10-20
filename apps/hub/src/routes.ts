@@ -23,9 +23,66 @@ import {
 } from "@ai-collab/contracts";
 import { StorageEngine } from "./types.js";
 import { HubScheduler } from "./scheduler.js";
-import { verifyPassword, createSessionToken, verifySessionToken } from "./auth.js";
+import {
+  verifyPassword,
+  createSessionToken,
+  verifySessionToken,
+  authMode,
+  authenticate,
+  classifyRequest,
+  newApiToken,
+  hashApiToken,
+  type Principal,
+} from "./auth.js";
 
 export function registerRoutes(app: FastifyInstance, storage: StorageEngine, scheduler: HubScheduler): void {
+  // ===== 鉴权守卫（HUB_AUTH_MODE: off / dashboard / strict）=====
+  app.addHook("onRequest", async (req: FastifyRequest, reply: FastifyReply) => {
+    const mode = authMode();
+    if (mode === "off") return;
+
+    const policy = classifyRequest(req.method, req.url);
+    if (policy === "public") return;
+
+    const principal = await authenticate(req, storage);
+    const attach = (p: Principal | null) => {
+      if (p) (req as any).principal = p;
+    };
+
+    // shared：Worker 与 UI 都会读；dashboard 按向后兼容放开
+    if (policy === "shared") {
+      if (principal) attach(principal);
+      else if (mode === "strict") {
+        return reply.code(401).send({ error: "未登录或凭据无效" });
+      }
+      return;
+    }
+
+    // worker：dashboard 模式兼容尚未配置 Token 的旧 Worker
+    if (policy === "worker") {
+      if (principal) {
+        if (principal.kind !== "agent" && principal.kind !== "user") {
+          return reply.code(403).send({ error: "凭据类型不允许调用执行接口" });
+        }
+        attach(principal);
+        return;
+      }
+      if (mode === "dashboard") return; // 兼容期：旧 Worker 无 Token 仍可执行
+      return reply.code(401).send({ error: "Worker 需要 Agent Token" });
+    }
+
+    if (!principal) return reply.code(401).send({ error: "未登录或凭据无效" });
+
+    if (policy === "admin" && !(principal.kind === "user" && principal.role === "admin")) {
+      return reply.code(403).send({ error: "需要管理员权限" });
+    }
+    if (policy === "user" && principal.kind !== "user") {
+      return reply.code(403).send({ error: "该操作需要用户身份" });
+    }
+
+    attach(principal);
+  });
+
   // 0. Web 控制台主页
   app.get("/", async (_req: FastifyRequest, reply: FastifyReply) => {
     const candidates = [
@@ -129,6 +186,9 @@ export function registerRoutes(app: FastifyInstance, storage: StorageEngine, sch
       },
       currentAttempt: 0,
       version: 1,
+      createdBy: ((req as any).principal as Principal | undefined)?.kind === "user"
+        ? ((req as any).principal as Principal & { kind: "user" }).userId
+        : null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
@@ -226,6 +286,54 @@ export function registerRoutes(app: FastifyInstance, storage: StorageEngine, sch
   app.get("/api/messages", async (req: FastifyRequest<{ Querystring: { limit?: string } }>) => {
     const limit = req.query.limit ? parseInt(req.query.limit, 10) : 100;
     return storage.listAllMessages(limit);
+  });
+
+  // 6.5 API Token 管理（明文仅创建时返回一次）
+  app.get("/api/tokens", async (req: FastifyRequest, reply: FastifyReply) => {
+    const principal = (req as any).principal as Principal | undefined;
+    if (!principal || principal.kind !== "user") return reply.code(401).send({ error: "需要用户身份" });
+    const list = await storage.listApiTokens(principal.userId);
+    return list.map((t) => ({
+      id: t.id,
+      label: t.label,
+      agentId: t.agentId,
+      createdAt: t.createdAt,
+      lastUsedAt: t.lastUsedAt,
+      revoked: Boolean(t.revokedAt),
+    }));
+  });
+
+  app.post("/api/tokens", async (req: FastifyRequest, reply: FastifyReply) => {
+    const principal = (req as any).principal as Principal | undefined;
+    if (!principal || principal.kind !== "user") return reply.code(401).send({ error: "需要用户身份" });
+    const body = req.body as { label?: string; agentId?: string };
+    const label = String(body?.label || "").trim();
+    if (!label) return reply.code(400).send({ error: "请填写令牌用途标签" });
+    const agentId = body?.agentId ? String(body.agentId).trim() : null;
+    if (agentId && !/^[A-Za-z0-9._:-]{1,64}$/.test(agentId)) {
+      return reply.code(400).send({ error: "Agent 标识不合法" });
+    }
+    const raw = newApiToken();
+    const record = {
+      id: `tok_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      userId: principal.userId,
+      agentId,
+      label,
+      tokenHash: hashApiToken(raw),
+      createdAt: new Date().toISOString(),
+      lastUsedAt: null,
+      revokedAt: null,
+    };
+    await storage.createApiToken(record);
+    return reply.status(201).send({ id: record.id, label, agentId, token: raw });
+  });
+
+  app.delete("/api/tokens/:id", async (req: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) => {
+    const principal = (req as any).principal as Principal | undefined;
+    if (!principal || principal.kind !== "user") return reply.code(401).send({ error: "需要用户身份" });
+    const ok = await storage.revokeApiToken(req.params.id, principal.userId);
+    if (!ok) return reply.code(404).send({ error: "令牌不存在或已吊销" });
+    return { ok: true };
   });
 
   // 7. 事件流 (SSE 与断点游标)
@@ -329,6 +437,8 @@ export function registerRoutes(app: FastifyInstance, storage: StorageEngine, sch
 
   app.post("/api/approvals/:id/decision", async (req: FastifyRequest<{ Params: { id: string } }>) => {
     const input = ApprovalDecisionInputSchema.parse(req.body);
-    return storage.decideApproval(req.params.id, input.decision, "human_admin");
+    const principal = (req as any).principal as Principal | undefined;
+    const decidedBy = principal?.kind === "user" ? principal.username : "admin";
+    return storage.decideApproval(req.params.id, input.decision, decidedBy);
   });
 }

@@ -391,3 +391,164 @@ test("AgentId 允许任意 slug 并拒绝非法字符", async () => {
   assert.throws(() => AgentId.parse("bad agent id"));
   assert.throws(() => AgentId.parse(""));
 });
+
+async function loginToken(app: Awaited<ReturnType<typeof buildServer>>, username: string, password: string): Promise<string> {
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/auth/login",
+    payload: { username, password },
+  });
+  assert.equal(res.statusCode, 200, res.body);
+  return JSON.parse(res.body).token as string;
+}
+
+test("鉴权 dashboard：匿名创建任务被拒，登录后可创建；Worker 端点保持兼容", async () => {
+  process.env.HUB_AUTH_MODE = "dashboard";
+  const storage = new MemoryStorageEngine();
+  await storage.createUser({ id: "u_admin", username: "admin", passwordHash: hashPassword("Passw0rd!"), role: "admin" });
+  const app = await buildServer({ storage });
+  await app.ready();
+  try {
+    await storage.createProject({ id: "p_auth", name: "Auth", uvcsRepo: "r", baseBranch: "/main", createdAt: new Date().toISOString() });
+
+    const anon = await app.inject({
+      method: "POST",
+      url: "/api/tasks",
+      payload: { projectId: "p_auth", title: "匿名任务", goal: "g", acceptanceCriteria: "a", assignedAgent: "grok-a" },
+    });
+    assert.equal(anon.statusCode, 401);
+
+    const session = await loginToken(app, "admin", "Passw0rd!");
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/tasks",
+      headers: { authorization: `Bearer ${session}` },
+      payload: { projectId: "p_auth", title: "登录任务", goal: "g", acceptanceCriteria: "a", assignedAgent: "grok-a" },
+    });
+    assert.equal(created.statusCode, 201);
+    assert.equal(JSON.parse(created.body).createdBy, "u_admin");
+
+    // 兼容期：Worker 端点无 Token 仍可用
+    const claim = await app.inject({
+      method: "POST",
+      url: "/api/runs/claim",
+      payload: { workerId: "w_probe", projectId: "p_auth", agentType: "grok-a", timeoutSeconds: 1 },
+    });
+    assert.equal(claim.statusCode, 200);
+  } finally {
+    await app.close();
+    delete process.env.HUB_AUTH_MODE;
+  }
+});
+
+test("鉴权 strict：Worker 端点需要 Agent Token，且 Agent Token 不能用于审批", async () => {
+  process.env.HUB_AUTH_MODE = "strict";
+  const storage = new MemoryStorageEngine();
+  await storage.createUser({ id: "u_admin", username: "admin", passwordHash: hashPassword("Passw0rd!"), role: "admin" });
+  const app = await buildServer({ storage });
+  await app.ready();
+  try {
+    await storage.createProject({ id: "p_strict", name: "Strict", uvcsRepo: "r", baseBranch: "/main", createdAt: new Date().toISOString() });
+    const session = await loginToken(app, "admin", "Passw0rd!");
+
+    const noToken = await app.inject({
+      method: "POST",
+      url: "/api/runs/claim",
+      payload: { workerId: "w_probe", projectId: "p_strict", agentType: "grok-a", timeoutSeconds: 1 },
+    });
+    assert.equal(noToken.statusCode, 401);
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/tokens",
+      headers: { authorization: `Bearer ${session}` },
+      payload: { label: "grok-a worker", agentId: "grok-a" },
+    });
+    assert.equal(created.statusCode, 201);
+    const agentToken = JSON.parse(created.body).token as string;
+    assert.match(agentToken, /^ac_/);
+
+    const withToken = await app.inject({
+      method: "POST",
+      url: "/api/runs/claim",
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: { workerId: "w_probe", projectId: "p_strict", agentType: "grok-a", timeoutSeconds: 1 },
+    });
+    assert.equal(withToken.statusCode, 200);
+
+    // Agent 令牌不可用于人工审批
+    const approval = await storage.createApproval({
+      id: "appr_strict",
+      projectId: "p_strict",
+      taskId: "t",
+      runId: "r",
+      action: "cm lock",
+      paramsHash: "h",
+      description: "d",
+      details: {},
+      status: "pending",
+      requestedBy: "grok-a",
+      decidedBy: null,
+      decidedAt: null,
+      expiresAt: new Date(Date.now() + 60000).toISOString(),
+      createdAt: new Date().toISOString(),
+    });
+    assert.equal(approval.status, "pending");
+
+    const forbidden = await app.inject({
+      method: "POST",
+      url: "/api/approvals/appr_strict/decision",
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: { decision: "approved" },
+    });
+    // 已认证但身份类型不符：403（而非未认证的 401）
+    assert.equal(forbidden.statusCode, 403);
+
+    // 用户会话可以审批，并记录真实用户名
+    const decided = await app.inject({
+      method: "POST",
+      url: "/api/approvals/appr_strict/decision",
+      headers: { authorization: `Bearer ${session}` },
+      payload: { decision: "approved" },
+    });
+    assert.equal(decided.statusCode, 200);
+    assert.equal(JSON.parse(decided.body).decidedBy, "admin");
+  } finally {
+    await app.close();
+    delete process.env.HUB_AUTH_MODE;
+  }
+});
+
+test("API Token 可吊销，吊销后立即失效", async () => {
+  process.env.HUB_AUTH_MODE = "dashboard";
+  const storage = new MemoryStorageEngine();
+  await storage.createUser({ id: "u_admin", username: "admin", passwordHash: hashPassword("Passw0rd!"), role: "admin" });
+  const app = await buildServer({ storage });
+  await app.ready();
+  try {
+    const session = await loginToken(app, "admin", "Passw0rd!");
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/tokens",
+      headers: { authorization: `Bearer ${session}` },
+      payload: { label: "personal" },
+    });
+    const { id, token: raw } = JSON.parse(created.body);
+
+    const ok = await app.inject({ method: "GET", url: "/api/tasks", headers: { authorization: `Bearer ${raw}` } });
+    assert.equal(ok.statusCode, 200);
+
+    const revoked = await app.inject({
+      method: "DELETE",
+      url: `/api/tokens/${id}`,
+      headers: { authorization: `Bearer ${session}` },
+    });
+    assert.equal(revoked.statusCode, 200);
+
+    const after = await app.inject({ method: "GET", url: "/api/tasks", headers: { authorization: `Bearer ${raw}` } });
+    assert.equal(after.statusCode, 401);
+  } finally {
+    await app.close();
+    delete process.env.HUB_AUTH_MODE;
+  }
+});

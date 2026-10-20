@@ -54,6 +54,10 @@ export class MemoryStorageEngine implements StorageEngine {
   private approvals = new Map<string, Approval>();
   private artifacts = new Map<string, Artifact>();
   private users = new Map<string, { id: string; username: string; passwordHash: string; role: "admin" | "member"; createdAt: string }>();
+  private apiTokens = new Map<string, {
+    id: string; userId: string; agentId: string | null; label: string;
+    tokenHash: string; createdAt: string; lastUsedAt: string | null; revokedAt: string | null;
+  }>();
   private a2aEnvelopes = new Map<string, any>();
   private a2aIdempotency = new Set<string>();
   private eventCursor = 1;
@@ -455,6 +459,37 @@ export class MemoryStorageEngine implements StorageEngine {
     return this.users.get(username) || null;
   }
 
+  async getUserById(id: string): Promise<any> {
+    return Array.from(this.users.values()).find((u) => u.id === id) || null;
+  }
+
+  async createApiToken(token: any): Promise<any> {
+    this.apiTokens.set(token.id, { ...token });
+    return token;
+  }
+
+  async getApiTokenByHash(hash: string): Promise<any> {
+    return Array.from(this.apiTokens.values()).find((t) => t.tokenHash === hash) || null;
+  }
+
+  async listApiTokens(userId: string): Promise<any[]> {
+    return Array.from(this.apiTokens.values())
+      .filter((t) => t.userId === userId)
+      .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+  }
+
+  async revokeApiToken(id: string, userId: string): Promise<boolean> {
+    const token = this.apiTokens.get(id);
+    if (!token || token.userId !== userId || token.revokedAt) return false;
+    token.revokedAt = new Date().toISOString();
+    return true;
+  }
+
+  async touchApiToken(id: string): Promise<void> {
+    const token = this.apiTokens.get(id);
+    if (token) token.lastUsedAt = new Date().toISOString();
+  }
+
   async saveA2AEnvelope(envelope: any): Promise<{ envelope: any; duplicate: boolean }> {
     if (this.a2aIdempotency.has(envelope.idempotencyKey)) {
       const existing = Array.from(this.a2aEnvelopes.values()).find(
@@ -571,8 +606,8 @@ export class PostgresStorageEngine implements StorageEngine {
 
   async createTask(task: Task): Promise<Task> {
     await this.pool.query(
-      `INSERT INTO tasks (id, project_id, parent_task_id, title, goal, acceptance_criteria, assigned_agent, state, budget, current_attempt, version, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+      `INSERT INTO tasks (id, project_id, parent_task_id, title, goal, acceptance_criteria, assigned_agent, state, budget, current_attempt, version, created_by, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
       [
         task.id,
         task.projectId,
@@ -585,6 +620,7 @@ export class PostgresStorageEngine implements StorageEngine {
         JSON.stringify(task.budget),
         task.currentAttempt,
         task.version,
+        task.createdBy ?? null,
         task.createdAt,
         task.updatedAt,
       ]
@@ -1231,6 +1267,74 @@ export class PostgresStorageEngine implements StorageEngine {
     };
   }
 
+  async getUserById(id: string): Promise<any> {
+    const res = await this.pool.query(`SELECT * FROM users WHERE id = $1`, [id]);
+    if (!res.rows[0]) return null;
+    const r = res.rows[0];
+    return {
+      id: r.id,
+      username: r.username,
+      passwordHash: r.password_hash,
+      role: r.role,
+      createdAt: r.created_at.toISOString(),
+    };
+  }
+
+  async createApiToken(token: any): Promise<any> {
+    await this.pool.query(
+      `INSERT INTO api_tokens (id, user_id, agent_id, label, token_hash, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [token.id, token.userId, token.agentId, token.label, token.tokenHash, token.createdAt]
+    );
+    return token;
+  }
+
+  async getApiTokenByHash(hash: string): Promise<any> {
+    const res = await this.pool.query(`SELECT * FROM api_tokens WHERE token_hash = $1`, [hash]);
+    if (!res.rows[0]) return null;
+    const r = res.rows[0];
+    return {
+      id: r.id,
+      userId: r.user_id,
+      agentId: r.agent_id,
+      label: r.label,
+      tokenHash: r.token_hash,
+      createdAt: r.created_at.toISOString(),
+      lastUsedAt: r.last_used_at ? r.last_used_at.toISOString() : null,
+      revokedAt: r.revoked_at ? r.revoked_at.toISOString() : null,
+    };
+  }
+
+  async listApiTokens(userId: string): Promise<any[]> {
+    const res = await this.pool.query(
+      `SELECT id, user_id, agent_id, label, created_at, last_used_at, revoked_at
+       FROM api_tokens WHERE user_id = $1 ORDER BY created_at DESC`,
+      [userId]
+    );
+    return res.rows.map((r) => ({
+      id: r.id,
+      userId: r.user_id,
+      agentId: r.agent_id,
+      label: r.label,
+      tokenHash: "",
+      createdAt: r.created_at.toISOString(),
+      lastUsedAt: r.last_used_at ? r.last_used_at.toISOString() : null,
+      revokedAt: r.revoked_at ? r.revoked_at.toISOString() : null,
+    }));
+  }
+
+  async revokeApiToken(id: string, userId: string): Promise<boolean> {
+    const res = await this.pool.query(
+      `UPDATE api_tokens SET revoked_at = NOW() WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL`,
+      [id, userId]
+    );
+    return (res.rowCount || 0) > 0;
+  }
+
+  async touchApiToken(id: string): Promise<void> {
+    await this.pool.query(`UPDATE api_tokens SET last_used_at = NOW() WHERE id = $1`, [id]);
+  }
+
   async saveA2AEnvelope(envelope: any): Promise<{ envelope: any; duplicate: boolean }> {
     try {
       await this.pool.query(
@@ -1297,6 +1401,7 @@ export class PostgresStorageEngine implements StorageEngine {
       budget: r.budget,
       currentAttempt: r.current_attempt,
       version: r.version,
+      createdBy: r.created_by ?? null,
       createdAt: r.created_at.toISOString(),
       updatedAt: r.updated_at.toISOString(),
     };
