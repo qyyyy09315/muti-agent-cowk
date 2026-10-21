@@ -17,6 +17,7 @@ export function redact(value) {
   if (typeof value === 'string') return value
     .replace(/Bearer\s+[^\s"<>]+/gi, 'Bearer [已隐藏]')
     .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, '$1[已隐藏]@')
+    .replace(/\bac_[A-Za-z0-9_-]{16,}/g, '[已隐藏]')
     .replace(/\bsk-[A-Za-z0-9_-]{12,}/g, '[已隐藏]')
     .replace(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '[已隐藏]')
     .replace(/(["']?(?:password|passwd|api[_-]?key|(?:hub[_-]?|access[_-]?|refresh[_-]?)?token|authorization)["']?\s*[=:]\s*["']?)[^\s,"'&}]+/gi, '$1[已隐藏]');
@@ -56,14 +57,14 @@ export function chooseLogs(profile) {
 export function readLocal(profile) {
   const cfg = readJson(path.join(profile, 'worker-config.json'), {});
   const logs = chooseLogs(profile);
-  const out = tail(logs.stdout).split(/\r?\n/).filter(Boolean).slice(-240);
+  const out = publicLogLines(tail(logs.stdout,262144),true).slice(-600);
   const err = tail(logs.stderr).split(/\r?\n/).filter(Boolean).slice(-100);
   let inbox = [];
   try { inbox = fs.readdirSync(path.join(profile, 'inbox')).filter(n => n.endsWith('.json')).map(n => ({ name: n, ...readJson(path.join(profile, 'inbox', n), {}), updatedAt: fs.statSync(path.join(profile, 'inbox', n)).mtime.toISOString() })); } catch {}
   const phases = out.filter(line => /\[Pipeline |成功抢单|任务交付|流程中断/.test(line));
   return {
     profile, profileExists: fs.existsSync(profile), configured: Boolean(cfg.hubUrl && cfg.projectId),
-    identity: { username: cfg.username, hostname: os.hostname(), agentType: cfg.agentType||'codex', workerId: cfg.workerId, projectId: cfg.projectId, projectName: cfg.projectName, hub: cfg.hubUrl, sourceCommit: cfg.sourceCommit, workspace: cfg.workspaceDir, taskWorkspaceRoot: cfg.taskWorkspaceRoot, messageModel: cfg.messageModel },
+    identity: { username: cfg.username, hostname: os.hostname(), agentType: cfg.agentId||cfg.agentType||'codex', agentId:cfg.agentId||cfg.agentType||'codex', progressPeerAgent:cfg.progressPeerAgent, workerId: cfg.workerId, projectId: cfg.projectId, projectName: cfg.projectName, hub: cfg.hubUrl, sourceCommit: cfg.sourceCommit, workspace: cfg.workspaceDir, taskWorkspaceRoot: cfg.taskWorkspaceRoot, messageModel: cfg.messageModel },
     logs: { ...logs, stdoutLines: out, stderrLines: err, updatedAt: logs.stdout ? fs.statSync(logs.stdout).mtime.toISOString() : null },
     inbox: inbox.map(({name, cursor, pending, updatedAt}) => ({name, cursor, pendingReply: Boolean(pending), pendingMessageId: pending?.message?.replyToId || null, updatedAt})),
     listenerSeen: out.some(l => l.includes('[Messages]: listening')), phase: phases.at(-1) || null,
@@ -71,9 +72,45 @@ export function readLocal(profile) {
     lastReplied: out.filter(l => l.includes('[Message replied]')).at(-1) || null,
   };
 }
+// Only public execution output: omit reasoning blocks from the CLI stderr stream.
+export function publicLogLines(text,cli=false) {
+  let hidden=cli;
+  return text.split(/\r?\n/).filter(line=>{
+    if(/(?:^|\[Codex-Err\]:\s*)(?:thinking|analysis)\s*$/i.test(line)){hidden=true;return false;}
+    if(hidden && /\[Codex-Err\]:\s*(?:exec|apply[_ ]patch|codex|tokens used|final)\b/i.test(line))hidden=false;
+    if(/^\[(?:Worker|Pipeline|Messages|Message received|Message replied)/.test(line))hidden=false;
+    return !hidden && Boolean(line);
+  });
+}
+export function executionView(local,sessions=[],processes=[],cfg={}) {
+  const lines=local.logs.stdoutLines;
+  let phase='等待执行输出',evidence=null;
+  for(let i=0;i<lines.length;i++){
+    const line=lines[i];
+    if(/\[Pipeline|\[Worker.*(?:成功抢单|任务交付|流程中断)/.test(line)){
+      if(/checkin|签入|提交/i.test(line)){phase='提交与交付';evidence=line;}
+      else if(/编译|质量|Step 5/i.test(line)){phase='编译与质量检查';evidence=line;}
+      else if(/流程中断|失败/.test(line)){phase='执行中断';evidence=line;}
+    }
+    if(/\[Codex-Err\]:\s*exec\s*$/.test(line)){
+      evidence=lines[i+1]||line;
+      phase=/Unity\.exe.*-batchmode/i.test(evidence)?'Unity 编译 / 场景处理':/cm.*(?:checkin)/i.test(evidence)?'提交与交付':/Editor\.log|status|Get-Content|rg\s/i.test(evidence)?'检查工程与验证结果':'执行命令';
+    }
+    if(/\[Codex-Err\]:\s*apply[_ ]patch\b/.test(line)||/^\*\*\* (?:Add|Update) File:/.test(line)){phase='编写与修改文件';evidence=line;}
+  }
+  const session=sessions.find(s=>s.kind==='任务 CLI')||sessions.find(s=>s.kind==='收件 CLI');
+  let compiler={path:null,lines:[],updatedAt:null};
+  if(session && ((cfg.taskWorkspaceRoot&&inside(session.cwd,cfg.taskWorkspaceRoot)) || (cfg.messageWorkspaceDir&&path.resolve(session.cwd)===path.resolve(cfg.messageWorkspaceDir)))){
+    const file=path.join(session.cwd,'Editor.log');
+    try{compiler={path:file,lines:publicLogLines(tail(file,65536)).slice(-160),updatedAt:fs.statSync(file).mtime.toISOString()};}catch{}
+  }
+  const active=processes.some(p=>/CLI/.test(p.kind));
+  if(active && compiler.updatedAt && Date.now()-new Date(compiler.updatedAt).getTime()<15000 && compiler.lines.slice(-12).some(l=>/Compiling Scripts|ScriptCompilationBuildProgram|bee_backend\.exe/.test(l))){phase='Unity 编译 / 场景处理';evidence=compiler.lines.at(-1);}
+  return {phase,phaseSource:'根据公开命令与流水线日志推断',evidence,active,updatedAt:local.logs.updatedAt,compiler};
+}
 export function inspectSessions(profile, cfg = {}, home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex')) {
   // Restrict reads to sessions explicitly belonging to this Worker's inbox/task cwd.
-  const inbox = path.join(profile, 'message-session');
+  const inbox = cfg.messageEditingEnabled&&cfg.messageWorkspaceDir ? cfg.messageWorkspaceDir : path.join(profile, 'message-session');
   const dates = [new Date(), new Date(Date.now() - 86400000)];
   const files = [];
   for (const date of dates) {

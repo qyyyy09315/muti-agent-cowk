@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
-import {readJson,readLocal,redact,inspectSessions,allowedRequest,discoverProfile} from './core.mjs';
+import {readJson,readLocal,redact,inspectSessions,allowedRequest,discoverProfile,executionView} from './core.mjs';
 const here=path.dirname(fileURLToPath(import.meta.url));
 const args=process.argv.slice(2);
 function option(key,fallback){const i=args.indexOf(key);return i<0?fallback:args[i+1];}
@@ -38,14 +38,14 @@ function collect(){
 }
 function snapshot(){
  const local=readLocal(profile),cfg=readJson(path.join(profile,'worker-config.json'),{});
- if(Date.now()-lastSessions>7000){sessionCache=inspectSessions(profile,cfg);lastSessions=Date.now();}
+ if(Date.now()-lastSessions>2000){sessionCache=inspectSessions(profile,cfg);lastSessions=Date.now();}
  const own=(remote.workers||[]).find(w=>w.id===local.identity.workerId);
  const processes=remote.processes||[];
  const roots=processes.filter(p=>p.kind==='Worker');
  const active=processes.filter(p=>/CLI/.test(p.kind));
- return redact({service:'ai-collab-local-monitor',schemaVersion:1,now:new Date().toISOString(),refreshMs:2000,readOnly:true,collecting,
+ return redact({service:'ai-collab-local-monitor',schemaVersion:1,now:new Date().toISOString(),refreshMs:1000,readOnly:true,collecting,
   local,remote,processCount:roots.length,cli:{active,mode:active.length?'正在处理':roots.length?'空闲 / 等待消息或任务':'Worker未运行'},
-  ownWorker:own||null,sessions:sessionCache,previousCollectedAt:previous?.checkedAt||null});
+  execution:executionView(local,sessionCache,processes,cfg),ownWorker:own||null,sessions:sessionCache,previousCollectedAt:previous?.checkedAt||null});
 }
 const types={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8'};
 const server=http.createServer((req,res)=>{

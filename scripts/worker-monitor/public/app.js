@@ -1,5 +1,5 @@
 const $=id=>document.getElementById(id);
-let snapshot=null,paused=false,busy=false,tab='session',terminalText='',lastMessages='',lastTasks='';
+let snapshot=null,paused=false,busy=false,tab='live',terminalText='',lastMessages='',lastTasks='';
 function time(value,full=false){if(!value)return '未取得';const d=new Date(value);return Number.isNaN(d.getTime())?'时间未知':d.toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',...(full?{}:{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}),hour12:false});}
 function node(tag,className,text){const el=document.createElement(tag);if(className)el.className=className;if(text!==undefined)el.textContent=text;return el;}
 function metric(id,text,tone=''){const el=$(id);el.textContent=text;el.className='metric-value '+tone;}
@@ -37,17 +37,18 @@ const stateNames={queued:'排队',leased:'已领取',running:'执行中',waiting
 function renderTasks(){
  const tasks=(snapshot.remote.tasks||[]).flat().filter(Boolean).sort((a,b)=>String(b.updatedAt).localeCompare(String(a.updatedAt)));
  $('task-count').textContent=tasks.length;
- const key=JSON.stringify(tasks);if(key!==lastTasks){lastTasks=key;
+ const key=JSON.stringify([tasks,snapshot.cli.active.length,snapshot.execution?.phase]);if(key!==lastTasks){lastTasks=key;
   $('tasks').replaceChildren(...(tasks.length?tasks.slice(0,12).map(t=>{
    const row=node('article','task'),head=node('div','task-heading');
    const tone=['failed','cancelled'].includes(t.state)?'bad':['running','leased','queued'].includes(t.state)?'':'warn';
-   head.append(node('div','task-title',t.title),node('span','badge '+tone,stateNames[t.state]||t.state));
+   const executing=['leased','running'].includes(t.state)&&t.assignedAgent===snapshot.local.identity.agentId&&snapshot.cli.active.some(p=>p.kind==='任务 CLI');
+   head.append(node('div','task-title',t.title),node('span','badge '+tone,executing?'CLI 执行中':stateNames[t.state]||t.state));
    row.append(head,node('div','task-meta',(t.assignedAgent||'未分派')+' · '+t.id),node('div','task-meta','第 '+(t.currentAttempt||0)+' 次领取 · 更新于 '+time(t.updatedAt)));return row;
   }):[node('div','empty','暂无任务快照')]));
  }
  const processes=snapshot.remote.processes||[];
  $('processes').replaceChildren(...(processes.length?processes.map(p=>{const row=node('div','process-row');row.append(node('span','',p.kind+' · '+p.name),node('span','','PID '+p.pid+' ← '+p.parentPid));return row;}):[node('div','metric-detail','未发现 Worker 进程，或进程采集尚未完成')]));
- $('phase').textContent=snapshot.local.phase?'日志最后阶段（不代表仍在执行）：'+snapshot.local.phase:'暂无流水线阶段记录';
+ $('phase').textContent=snapshot.execution?(snapshot.execution.active?'最近执行阶段：':'最近日志阶段：')+snapshot.execution.phase+' · '+snapshot.execution.phaseSource:'等待执行阶段日志';
 }
 function sessionText(){
  const sessions=snapshot.sessions||[];
@@ -62,11 +63,15 @@ function sessionText(){
 function renderTerminal(){
  if(!snapshot)return;
  const logs=snapshot.local.logs;
- const content={session:sessionText(),stdout:logs.stdoutLines.join('\n')||'暂无 Worker 日志。启动记录缺失时会自动查找最新日志。',stderr:logs.stderrLines.join('\n')||'当前选中错误日志为空。网络重试也可能记录在 Worker 日志中。',events:(snapshot.remote.events||[]).map(e=>'['+time(e.createdAt)+'] #'+e.id+' '+e.type+'\n'+JSON.stringify(e.payload,null,2)).join('\n\n')||'尚无 Hub 事件快照。'}[tab];
+ const compiler=snapshot.execution?.compiler;
+ const live=['━━ CLI 命令与文件修改输出 · '+time(logs.updatedAt)+' ━━',logs.stdoutLines.join('\n')||'等待 CLI 执行输出…','', '━━ Unity 编译日志 · '+time(compiler?.updatedAt)+' ━━',compiler?.lines?.join('\n')||'当前工作区尚无可读取的 Editor.log'].join('\n');
+ const content={live,session:sessionText(),stdout:logs.stdoutLines.join('\n')||'暂无 Worker 日志。启动记录缺失时会自动查找最新日志。',stderr:logs.stderrLines.join('\n')||'当前选中错误日志为空。网络重试也可能记录在 Worker 日志中。',events:(snapshot.remote.events||[]).map(e=>'['+time(e.createdAt)+'] #'+e.id+' '+e.type+'\n'+JSON.stringify(e.payload,null,2)).join('\n\n')||'尚无 Hub 事件快照。'}[tab];
  const filter=$('log-filter').value.trim().toLowerCase();terminalText=filter?content.split('\n').filter(l=>l.toLowerCase().includes(filter)).join('\n'):content;
  const terminal=$('terminal');if(terminal.textContent!==terminalText){terminal.textContent=terminalText||'没有匹配的内容';if($('autoscroll').checked)terminal.scrollTop=terminal.scrollHeight;}
- $('terminal-description').textContent={session:'最近两天内、此 Worker 专属的 CLI 公开对话（限量读取）',stdout:'最新 240 行 · 含消息收发、任务阶段及网络重试',stderr:'最新 100 行 · 标准错误输出',events:'本次监视服务已采集的最近 120 个 Hub 事件'}[tab];
- $('terminal-source').textContent={session:'后台 CLI 会话与当前桌面聊天相互独立。没有新输出时不会生成模拟内容。',stdout:logs.stdout||'日志路径未找到',stderr:logs.stderr||'错误日志路径未找到',events:'采集于 '+time(snapshot.remote.checkedAt,true)}[tab];
+ $('terminal-description').textContent={live:'每秒读取 · CLI 命令 / 文件修改 + Unity 编译输出 · 不显示内部推理',session:'最近两天内、此 Worker 专属的 CLI 公开对话（限量读取）',stdout:'最新 600 行 · 含消息收发、任务阶段及网络重试',stderr:'最新 100 行 · 标准错误输出',events:'本次监视服务已采集的最近 120 个 Hub 事件'}[tab];
+ $('terminal-source').textContent={live:'CLI: '+(logs.stdout||'等待日志')+' · Unity: '+(compiler?.path||'尚未生成'),session:'后台 CLI 会话与当前桌面聊天相互独立。没有新输出时不会生成模拟内容。',stdout:logs.stdout||'日志路径未找到',stderr:logs.stderr||'错误日志路径未找到',events:'采集于 '+time(snapshot.remote.checkedAt,true)}[tab];
+ $('live-phase').textContent=snapshot.execution?(snapshot.execution.active?'正在执行 · ':'最近阶段 · ')+snapshot.execution.phase:'等待执行输出';
+ $('live-updated').textContent='输出更新 '+time(logs.updatedAt)+' · 每秒检查';
 }
 function renderDetails(data){
  const identity=data.local.identity;
@@ -86,7 +91,7 @@ function render(data){
  $('inbox-detail').textContent='游标 '+cursor+' · '+(data.local.lastReplied?'已发现自动回复记录':'等待下一条消息')+'（不等于网络始终畅通）';
  metric('hub-status',data.remote.hubOk?'连接正常':'读取受阻',data.remote.hubOk?'good':'warn');
  $('hub-detail').textContent='最近采集 '+time(data.remote.checkedAt);
- $('refresh-state').textContent=(paused?'刷新已暂停':'每 2 秒刷新')+' · '+time(data.now);
+ $('refresh-state').textContent=(paused?'刷新已暂停':'每秒刷新')+' · '+time(data.now);
  $('footer-time').textContent='显示时间：北京时间';
  renderMessages();renderTasks();renderTerminal();renderDetails(data);
 }
@@ -102,4 +107,4 @@ $('message-filter').onchange=()=>{if(snapshot)renderMessages();};
 $('log-filter').oninput=renderTerminal;
 document.querySelectorAll('[data-tab]').forEach(button=>{button.onclick=()=>{tab=button.dataset.tab;document.querySelectorAll('[data-tab]').forEach(b=>b.setAttribute('aria-selected',String(b===button)));renderTerminal();};button.onkeydown=e=>{if(e.key!=='ArrowRight'&&e.key!=='ArrowLeft')return;const tabs=[...document.querySelectorAll('[data-tab]')],index=tabs.indexOf(button),next=tabs[(index+(e.key==='ArrowRight'?1:tabs.length-1))%tabs.length];next.focus();next.click();};});
 $('copy').onclick=async()=>{try{await navigator.clipboard.writeText(terminalText);$('copy').textContent='copied';}catch{$('copy').textContent='copy failed';}setTimeout(()=>{$('copy').textContent='copy';},1800);};
-poll();setInterval(()=>poll(),2000);
+poll();setInterval(()=>poll(),1000);

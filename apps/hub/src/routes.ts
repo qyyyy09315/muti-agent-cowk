@@ -329,7 +329,7 @@ export function registerRoutes(app: FastifyInstance, storage: StorageEngine, sch
       createdAt: new Date().toISOString(),
     };
     const res = await storage.saveMessage(msg);
-    if (!res.duplicate && !msg.replyToId) {
+    if (!res.duplicate && !msg.replyToId && !msg.threadId.startsWith("progress:")) {
       const task = await storage.getTask(msg.taskId);
       if (
         task &&

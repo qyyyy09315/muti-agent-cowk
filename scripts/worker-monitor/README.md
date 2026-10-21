@@ -90,3 +90,9 @@ pnpm test:monitor
 ```
 
 核心测试覆盖配置发现、日志回退、路径限制、尾读/脱敏、长元信息的专属会话与内部推理排除、Host/Origin。HTTP测试覆盖配置缺失/只读/亮色页面；Windows上另启mock Hub验证真实PowerShell只发送GET且不回传令牌。测试不访问生产Hub。
+
+## 实时执行输出
+
+默认live页签每秒读取最新CLI公开执行输出（最多600行）和当前隔离任务工作区Editor.log（最多160行），支持跟随末尾、筛选、暂停与复制。日志区置于概览之后；阶段由公开命令/编译日志推断，空闲时标注最近阶段，不更改Hub状态。不展示内部推理，认证信息经脱敏。Hub/进程仍每5秒采集，不把旧快照当成新事件。
+
+可写消息会话只有配置messageEditingEnabled和messageWorkspaceDir后才纳入读取；监视页本身始终只读。可选协作启动器见[协作扩展](../collaboration/README.md)。

@@ -3,11 +3,13 @@
   "private": true,
   "scripts": {
     "build": "pnpm -r build",
-    "test": "pnpm -r test && pnpm test:monitor",
+    "test": "pnpm -r test && pnpm test:monitor && pnpm test:collaboration",
     "collab:doctor": "node scripts/doctor.mjs",
     "collab:check-update": "node scripts/check-update.mjs",
     "collab:monitor": "node scripts/worker-monitor/server.mjs",
-    "test:monitor": "node --test scripts/worker-monitor/*.test.mjs"
+    "test:monitor": "node --test scripts/worker-monitor/*.test.mjs",
+    "test:collaboration": "node --test scripts/collaboration/*.test.mjs",
+    "collab:runtime": "node scripts/collaboration/run.mjs"
   },
   "packageManager": "pnpm@10.27.0"
 }

@@ -55,6 +55,29 @@
       </div>
     </section>
 
+    <section class="block" id="terminal-panel">
+      <div class="block-head">
+        <span class="block-title">CLI live execution</span>
+        <div class="terminal-controls">
+          <label><input id="autoscroll" type="checkbox" checked> follow</label>
+          <button id="copy" type="button">copy</button>
+        </div>
+      </div>
+      <div class="block-note"><strong id="live-phase">等待执行输出</strong> · <span id="live-updated"></span></div>
+      <div class="tabs" role="tablist" aria-label="运行内容">
+        <button role="tab" aria-selected="true" data-tab="live">live</button><button role="tab" aria-selected="false" data-tab="session">session</button>
+        <button role="tab" aria-selected="false" data-tab="stdout">stdout</button>
+        <button role="tab" aria-selected="false" data-tab="stderr">stderr</button>
+        <button role="tab" aria-selected="false" data-tab="events">events</button>
+      </div>
+      <div class="terminal-toolbar">
+        <span id="terminal-description">读取此 Worker 专属的会话记录</span>
+        <input id="log-filter" type="search" placeholder="filter…" aria-label="筛选日志或对话">
+      </div>
+      <pre id="terminal" tabindex="0">正在采集…</pre>
+      <div id="terminal-source" class="block-note"></div>
+    </section>
+
     <div class="content-grid">
       <section class="block" id="messages-panel">
         <div class="block-head">
@@ -82,28 +105,6 @@
       </section>
     </div>
 
-    <section class="block" id="terminal-panel">
-      <div class="block-head">
-        <span class="block-title">logs &amp; session</span>
-        <div class="terminal-controls">
-          <label><input id="autoscroll" type="checkbox" checked> follow</label>
-          <button id="copy" type="button">copy</button>
-        </div>
-      </div>
-      <div class="tabs" role="tablist" aria-label="运行内容">
-        <button role="tab" aria-selected="true" data-tab="session">session</button>
-        <button role="tab" aria-selected="false" data-tab="stdout">stdout</button>
-        <button role="tab" aria-selected="false" data-tab="stderr">stderr</button>
-        <button role="tab" aria-selected="false" data-tab="events">events</button>
-      </div>
-      <div class="terminal-toolbar">
-        <span id="terminal-description">读取此 Worker 专属的会话记录</span>
-        <input id="log-filter" type="search" placeholder="filter…" aria-label="筛选日志或对话">
-      </div>
-      <pre id="terminal" tabindex="0">正在采集…</pre>
-      <div id="terminal-source" class="block-note"></div>
-    </section>
-
     <section class="block" id="details">
       <div class="block-head">
         <span class="block-title">connection</span>
@@ -113,7 +114,7 @@
     </section>
 
     <footer>
-      <span>仅监听 127.0.0.1 · 每 2 秒刷新 · 本机与 Hub 每 5 秒采集</span>
+      <span>仅监听 127.0.0.1 · 每秒刷新 · 本机与 Hub 每 5 秒采集</span>
       <span id="footer-time"></span>
     </footer>
   </main>

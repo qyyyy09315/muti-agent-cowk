@@ -7,7 +7,7 @@ try{$cfg=Get-Content -LiteralPath (Join-Path $ProfileDir 'worker-config.json') -
 try{$meta=Get-Content -LiteralPath (Join-Path $ProfileDir 'worker-process.json') -Raw|ConvertFrom-Json}catch{}
 try {
  $all=@(Get-CimInstance Win32_Process)
- $candidates=@($all|Where-Object {$_.Name -eq 'node.exe' -and $_.CommandLine -match '(?:ai_collab_worker\.mjs|[\\/]worker[\\/]dist[\\/]src[\\/]index\.js)' -and $_.CommandLine -notmatch 'preflight'})
+ $candidates=@($all|Where-Object {$_.Name -eq 'node.exe' -and $_.CommandLine -match '(?:ai_collab_worker\.mjs|[\\/]collaboration[\\/]run\.mjs|[\\/]worker[\\/]dist[\\/]src[\\/]index\.js)' -and $_.CommandLine -notmatch 'preflight'})
  $roots=@()
  if($meta){
   $roots=@($candidates|Where-Object {($meta.launcherPid -and $_.ParentProcessId -eq $meta.launcherPid) -or ($meta.nodePid -and $_.ProcessId -eq $meta.nodePid)})
@@ -17,6 +17,7 @@ try {
   $roots=@($candidates|Where-Object {
    $line=$_.CommandLine.Replace('\','/')
    ($cfg.workerId -and $_.CommandLine -match ('--worker-id[=\s]+["'']?'+[regex]::Escape($cfg.workerId)+'(?:["''\s]|$)')) -or
+   ($line -match ('--profile[=\s]+["'']?'+[regex]::Escape($ProfileDir.Replace('\','/'))+'(?:["''\s]|$)')) -or
    ($cfg.workspaceDir -and $line.IndexOf($cfg.workspaceDir.Replace('\','/'),[StringComparison]::OrdinalIgnoreCase) -ge 0)
   })
   if($roots.Count){$result.processAssociation='command identity'}

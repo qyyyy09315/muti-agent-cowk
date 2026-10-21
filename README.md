@@ -7,7 +7,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6?logo=typescript&logoColor=white)](#5-实现)
 [![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A520-339933?logo=node.js&logoColor=white)](#8-快速开始)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-%E2%89%A514-4169e1?logo=postgresql&logoColor=white)](#5-实现)
-[![Tests](https://img.shields.io/badge/tests-54%20passed-2f855a)](#6-实验与验证)
+[![Tests](https://img.shields.io/badge/tests-75%20passed-2f855a)](#6-实验与验证)
 [![License](https://img.shields.io/badge/license-MIT-2f855a)](#11-许可与致谢)
 
 [摘要](#摘要) · [引言](#1-引言) · [相关工作](#2-相关工作) · [系统架构](#3-系统架构) · [方法](#4-方法) · [实现](#5-实现) · [实验与验证](#6-实验与验证) · [局限](#7-局限与未来工作) · [快速开始](#8-快速开始) · [参考文献](#10-参考文献)
@@ -20,7 +20,7 @@
 
 本文介绍 **muti-agent-cowk**：一个面向异构命令行智能体（Grok Build、OpenAI Codex 等）与 Unity/UVCS 工程的跨主机协作交付系统。系统采用“中心协调、边缘执行”的混合架构：Hub 以 PostgreSQL 为唯一事实源，通过原子租约、单调 fencing token 与显式状态机实现任务的确定性派发；Worker 在本地持有模型凭据，于隔离工作区中执行，并通过 A2A 消息完成跨端接口对齐与评审。针对游戏工程中不可合并的二进制资产与元数据完整性问题，系统引入排他文件锁、`.meta` 校验、新鲜 Editor.log 门禁与检查点冻结机制。
 
-系统已在双机异构智能体环境中完成端到端验证，54 项自动化测试全部通过，覆盖竞态接单、租约丢失、故障注入与破坏性清理拦截等场景。
+当前版本通过75项自动化测试，覆盖指派领取、租约丢失、故障注入、破坏性清理拦截，以及进度问答、接管路由与日志尾读。自动化结果不等于任意真实模型任务或生产部署已完成业务验收。
 
 **关键词**：多智能体系统；异构智能体；分布式任务调度；fencing token；版本控制安全；Unity
 
@@ -83,33 +83,9 @@
 
 ### 3.2 总体结构
 
-```mermaid
-flowchart TB
-    subgraph CP["控制平面 · Hub"]
-        direction TB
-        NG["Nginx / TLS 终止"] --> API["Fastify<br/>REST · SSE · MCP"]
-        API --> SCH["调度器<br/>租约 · fencing token · 重试预算"]
-        SCH --> DB[("PostgreSQL<br/>任务 · 运行 · 事件 · 消息 · 令牌")]
-        API --> UI["Web 控制台<br/>审批 · 成员 · 令牌"]
-    end
+![图1：中心控制平面与独立执行端架构](docs/figures/system-architecture.png)
 
-    subgraph WA["执行端 A · 本地主机"]
-        WKA["Worker A<br/>Grok / Codex 适配器"]
-        WSA["隔离任务工作区"]
-        WKA --- WSA
-    end
-
-    subgraph WB["执行端 B · 本地主机"]
-        WKB["Worker B<br/>Codex / Grok 适配器"]
-        WSB["隔离任务工作区"]
-        WKB --- WSB
-    end
-
-    WKA <-->|"HTTPS 长轮询 / SSE"| API
-    WKB <-->|"HTTPS 长轮询 / SSE"| API
-    WSA --> VCS[("共享版本库<br/>UVCS / Git")]
-    WSB --> VCS
-```
+*图1. 中心协调、边缘执行：模型凭据留在本机，经过验证的变更集进入UVCS。*
 
 ### 3.3 组件职责
 
@@ -120,7 +96,7 @@ flowchart TB
 | **PostgreSQL** | 服务器 | 唯一事实源；行级锁与事件游标 |
 | **Web 控制台** | 服务器静态资源 | 任务与消息可视化、人工审批、成员与令牌管理 |
 | **本机监视台** | 各协作主机 | 只读回环面板：心跳、进程、消息、日志 |
-| **适配器** | Worker 进程内 | Grok ACP/stdio、Codex SDK 子进程桥接 |
+| **适配器** | Worker 进程内 | Grok ACP/stdio、Codex CLI 子进程桥接 |
 
 ---
 
@@ -130,30 +106,9 @@ flowchart TB
 
 系统定义 12 个状态，并通过显式转移表约束合法迁移；终态不可再迁移。
 
-```mermaid
-stateDiagram-v2
-    [*] --> queued
-    queued --> leased: 指定 Agent 原子领取
-    leased --> running: 租约有效
-    running --> submitted: 提交 changeset
-    submitted --> reviewing: 进入评审
-    reviewing --> completed: 评审通过
-    reviewing --> needs_changes: 退回修改
-    needs_changes --> queued: 新一轮修复
-    running --> waiting_peer: 向对端提问
-    waiting_peer --> running: 收到答复
-    waiting_peer --> queued: 答复后重新入队
-    running --> waiting_human: 需人工决策
-    waiting_human --> running: 人工放行
-    leased --> queued: 租约过期
-    queued --> paused
-    paused --> queued
-    queued --> cancelled
-    running --> failed
-    completed --> [*]
-    failed --> [*]
-    cancelled --> [*]
-```
+![图2：任务生命周期简图](docs/figures/task-lifecycle.png)
+
+*图2. 12种任务状态的主要迁移（简图，省略部分异常路径）；leased可直接提交，完整规则以[契约转移表](packages/contracts/src/state-machine.ts)为准。*
 
 > [!IMPORTANT]
 > 非法迁移在写入前即被拒绝；`completed`、`failed`、`cancelled` 为终态。互问成环时任务转入 `waiting_human`，由人工终止循环。
@@ -192,20 +147,9 @@ claim(agentId, projectId):
 
 跨端消息采用统一信封，支持 `clarify_interface`、`request_review`、`review_verdict` 与 `handover` 四类语义。消息共享 `taskId` 与 `threadId`，答复通过 `replyToId` 指回根提问。
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant A as Worker A
-    participant H as Hub
-    participant B as Worker B
+![图3：任务澄清与执行中进度讨论](docs/figures/peer-coordination.png)
 
-    A->>H: POST /api/messages（根提问）
-    H-->>B: SSE message_sent
-    B->>B: 调用本地会话生成答复
-    B->>H: POST /api/messages（replyToId）
-    H-->>A: SSE 答复
-    Note over H: waiting_peer → running / queued
-```
+*图3. 普通澄清消息与执行中的进度讨论。`progress:`线程保持现有任务状态与租约；答复回到同一执行上下文。图示的事件通道不表示默认Worker已改为SSE推送。*
 
 为抑制智能体互答死循环，系统只对**根提问**生成自动答复；答复本身不再触发自动回复。生成结果先落盘再发送，并携带稳定幂等键，因此 POST 响应丢失或进程重启不会造成重复消息。
 
@@ -218,7 +162,7 @@ Unity 工程包含场景、Prefab 与二进制资产，无法像纯文本仓库�
 | 工作区隔离 | 每个任务创建独立 workspace | 不污染主工作区 |
 | 分支隔离 | `br:/main/ai/<taskId>/<agentId>` | 变更可追溯、可丢弃 |
 | 排他锁 | 写前申请；仅释放本次成功获取的锁 | 避免误释放他人锁 |
-| `.meta` 完整性 | 校验 GUID 与孤儿元数据 | 防止资源引用断裂 |
+| `.meta` 完整性 | 校验文件/目录与meta配对、缺失和孤儿项 | 防止资源引用断裂 |
 | 编译门禁 | Editor.log 必须存在且新于流水线启动 | 防止用旧日志冒充通过 |
 | 检查点 | 破坏性清理前完整备份 | 失败不丢工作成果 |
 | 安全冻结 | 备份失败则禁止 `undocheckout`/删工作区 | 保留现场供人工恢复 |
@@ -236,6 +180,20 @@ Unity 工程包含场景、Prefab 与二进制资产，无法像纯文本仓库�
 | `admin` | 系统级 | ✓ | ✓ | ✓ | ✓ |
 
 审批权限单独判定，仅 `owner`、`reviewer` 与系统管理员可执行，避免“开发者自审自批”。认证材料采用 scrypt 口令哈希、HMAC-SHA256 会话与 SHA-256 令牌摘要；本机凭据以 DPAPI 加密保存。
+
+---
+
+### 4.5 执行中进度与协作目标更新
+
+可选执行端扩展在工作区就绪、文件修改、Unity批处理、验证、签入和Hub确认提交等节点汇报进度；CLI可提问并读取同一任务线程的实际回复。父Worker保管凭据、持久化发件箱、使用稳定幂等键重试。问题等待超时不视为同意，收到回复不会另开一个编辑器重做同一任务。
+
+`progress:<runId>`线程不把正在执行的任务误切为`waiting_peer`。接管通知需明确唯一的`toAgent`，通过同项目来源/请求关联、时效及在线Worker核验后，才持久化更改后续协作目标；它不改变本机Agent身份、权限或任务分派。核验器缺失时拒绝启用自动路由。
+
+本机监视台默认显示CLI公开执行输出与当前隔离工作区的Editor.log，每秒更新，标注根据日志推断的阶段；阶段标签不改变Hub任务状态，不显示模型内部推理。
+
+收件会话可读取父Worker提供的运行证据和指定云端变更集缓存；收件分支版本不代表云端交付不存在。云端读取不会切换工作区，指定摘要可用于比对下载文件。签入前可选纳管新增Assets/ProjectDocs交付文件，并排除日志。
+
+标准Worker入口仍保留。可选Codex启动器、私有配置样例、权限边界和使用方式见[scripts/collaboration](scripts/collaboration/README.md)。图像由内置绘图工具生成并人工核对；[编辑源稿](docs/figures/diagram-sources.md)与[绘图提示词](docs/figures/PROMPTS.md)随仓库保存。
 
 ---
 
@@ -279,7 +237,7 @@ muti-agent-cowk/
 | `POST` | `/api/runs/:id/submit` | 提交执行结果 |
 | `POST` | `/api/runs/:id/fail` | 失败上报与有界重试 |
 | `POST` | `/api/messages` | 发送 A2A 消息（幂等） |
-| `GET` | `/api/events` | SSE 事件流与游标补拉 |
+| `GET` | `/api/events` | 默认JSON游标补拉；`stream=true`启用SSE |
 | `POST` | `/api/approvals/:id/decision` | 人工审批 |
 | `GET` | `/api/tasks` | 任务列表与详情 |
 | `GET/POST` | `/api/tokens` | 个人令牌与 Agent 令牌管理 |
@@ -303,12 +261,13 @@ MCP 服务暴露 6 个工具：`project_status`、`task_create`、`task_get`、`
 | 测试层 | 覆盖内容 | 数量 | 结果 |
 | :-- | :-- | --: | :--: |
 | contracts | Schema、状态迁移、A2A 信封 | 7 | 通过 |
-| hub | 鉴权、令牌、成员、审批、调度、租约 | 11 | 通过 |
+| hub | 鉴权、令牌、成员、审批、调度、租约、进度线程 | 12 | 通过 |
 | worker | 消息监听、席位锁、幂等、超时、取消 | 13 | 通过 |
 | uvcs-workspace | `cm` 解析、锁、工作区、Unity 桥 | 4 | 通过 |
-| worker-monitor | 只读边界、DNS 重绑定、脱敏、回退 | 8 | 通过 |
+| worker-monitor | 只读边界、DNS重绑定、脱敏、回退、实时执行/编译尾读 | 10 | 通过 |
+| collaboration | 持久进度问答、同上下文答复、接管路由与本机helper | 18 | 通过 |
 | 端到端 + 消息监听 | 故障注入与全流程 | 11 | 通过 |
-| **合计** |  | **54** | **全部通过** |
+| **合计** |  | **75** | **全部通过** |
 
 端到端用例覆盖：缺少 Editor.log 必须拦截、加锁失败只释放已获取锁、任务工作区隔离、租约丢失禁止签入、子进程树强杀、`--changeset=cs:<n>` 参数、备份失败时安全冻结，以及真实 HTTP 下的双向消息闭环。
 
@@ -321,7 +280,7 @@ MCP 服务暴露 6 个工具：`project_status`、`task_create`、`task_get`、`
 ```bash
 pnpm install
 pnpm build
-pnpm test                 # 契约、Hub、Worker、UVCS、监视台共 43 项
+pnpm test                 # 契约、Hub、Worker、UVCS、监视台和协作扩展共64项
 node --test tests/*.test.mjs   # 端到端与消息监听 11 项
 ```
 
@@ -334,7 +293,8 @@ node --test tests/*.test.mjs   # 端到端与消息监听 11 项
 3. **双响应者风险**：若同一角色在两台主机同时监听，可能重复消耗模型配额；系统通过本地席位锁与运维约定缓解，但未做全局唯一性强制。
 4. **模型不确定性**：系统保证调度、隔离与交付边界，不保证生成内容的质量或可编译性。
 5. **引擎耦合**：Unity/UVCS 门禁与 `cm` CLI 紧密绑定，接入其他引擎需要新增适配层。
-6. **规模验证有限**：当前仅完成双机、少量并发任务的端到端验证，尚未进行大规模并发压测。
+6. **可选扩展边界**：进度与自动路由需显式配置；附带扩展启动器目前支持Codex，真实对端回复仍依赖协作者在线及其响应实现。消息编辑的目录限制是执行约定，不是操作系统沙箱。
+7. **规模验证有限**：当前仅完成双机、少量并发任务的端到端验证，尚未进行大规模并发压测。
 
 未来工作包括：控制平面高可用与领导者选举、基于 SSE 的主动推送、跨项目资源配额、以及更细粒度的审计与回放。
 

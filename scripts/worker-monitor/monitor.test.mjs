@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import {chooseLogs,readLocal,tail,redact,inspectSessions,allowedRequest,discoverProfile} from './core.mjs';
+import {chooseLogs,readLocal,tail,redact,inspectSessions,allowedRequest,discoverProfile,executionView,publicLogLines} from './core.mjs';
 function fixture(){return fs.mkdtempSync(path.join(os.tmpdir(),'worker-monitor-test-'));}
 test('profile selection uses explicit or unique config and rejects ambiguity',()=>{
  const dir=fixture();try{
@@ -54,4 +54,26 @@ test('rejects DNS rebinding hosts and cross-site reads',()=>{
  assert.equal(allowedRequest({headers:{host:'127.0.0.1:8787',origin:'https://evil.example'}},8787),false);
  assert.equal(allowedRequest({headers:{host:'127.0.0.1:8787','sec-fetch-site':'cross-site'}},8787),false);
  assert.equal(allowedRequest({headers:{host:'127.0.0.1:8787'}},8787),true);
+});
+
+test('live log rereads appended output, omits reasoning and infers compile from an executed command',()=>{
+ const dir=fixture();try{
+  const file=path.join(dir,'worker-live.stdout.log');
+  fs.writeFileSync(file,'partial private reasoning\n[AI-Exec]: [Codex-Err]: exec\npwsh write-script\npublic file output\n[AI-Exec]: [Codex-Err]: thinking\nprivate reasoning\n');
+  let local=readLocal(dir);assert.ok(!JSON.stringify(local).includes('private reasoning'));assert.ok(local.logs.stdoutLines.includes('public file output'));
+  fs.appendFileSync(file,'[AI-Exec]: [Codex-Err]: exec\nUnity.exe -batchmode -quit\nCompiling scripts\n');
+  local=readLocal(dir);assert.ok(local.logs.stdoutLines.includes('Compiling scripts'));
+  const view=executionView(local,[],[{kind:'任务 CLI'}]);assert.equal(view.phase,'Unity 编译 / 场景处理');assert.equal(view.active,true);
+  assert.equal(redact('ac_abcdefghijklmnopqrstuvwxyz0123456789'),'[已隐藏]');
+ }finally{fs.rmSync(dir,{recursive:true,force:true});}
+});
+test('compile tail stays within the configured task workspace and updates without restarting the monitor',()=>{
+ const dir=fixture();try{
+  const workspace=path.join(dir,'tasks','one');fs.mkdirSync(workspace,{recursive:true});const file=path.join(workspace,'Editor.log');fs.writeFileSync(file,'Compile start\n');
+  const local={logs:{stdoutLines:[],updatedAt:null}},cfg={taskWorkspaceRoot:path.join(dir,'tasks')};
+  const sessions=[{kind:'任务 CLI',cwd:workspace}];
+  assert.deepEqual(executionView(local,sessions,[],cfg).compiler.lines,['Compile start']);
+  fs.appendFileSync(file,'Compile succeeded\n');assert.equal(executionView(local,sessions,[],cfg).compiler.lines.at(-1),'Compile succeeded');
+  assert.equal(executionView(local,[{kind:'任务 CLI',cwd:dir}],[],cfg).compiler.path,null);
+ }finally{fs.rmSync(dir,{recursive:true,force:true});}
 });
