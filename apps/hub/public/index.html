@@ -169,6 +169,7 @@
     .task-table th { white-space: nowrap; }
     .task-table td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .task-table td.task-title { white-space: normal; }
+    .agent-table td.timestamp-cell, .task-table td.timestamp-cell { white-space: normal; }
     .task-table td.task-title strong { font-weight: 600; font-size: 13px; }
     .task-table td.task-meta-cell { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
 
@@ -739,7 +740,7 @@
           <td><span class="tag-agent tag-other">${provider}</span></td>
           <td>${online.length} / ${ws.length} 在线</td>
           <td title="${escapeHtml(hosts)}">${escapeHtml(hosts)}</td>
-          <td>${last ? new Date(last).toLocaleTimeString() : "—"}</td>
+          <td class="timestamp-cell">${last ? formatDateTime(last) : "—"}</td>
         </tr>`;
       }).join("");
 
@@ -784,7 +785,7 @@
             <td><span class="tag-agent tag-${t.assignedAgent}">${t.assignedAgent.toUpperCase()}</span></td>
             <td><span class="pill pill-${t.state}">${t.state}</span></td>
             <td>${t.currentAttempt} / ${t.budget?.maxRepairs ?? 3}</td>
-            <td style="font-size: 0.78rem; color: var(--muted);">${new Date(t.updatedAt).toLocaleTimeString()}</td>
+            <td class="timestamp-cell" style="font-size: 0.78rem; color: var(--muted);">${formatDateTime(t.updatedAt)}</td>
             <td class="task-actions">
               ${t.state === 'running' || t.state === 'leased' ? `<button class="btn btn-ghost btn-sm" onclick="taskAction('${t.id}', 'pause')">暂停</button>` : ''}
               ${t.state === 'paused' || t.state === 'waiting_peer' ? `<button class="btn btn-solid btn-sm" onclick="taskAction('${t.id}', 'resume')">唤醒继续</button>` : ''}
@@ -863,7 +864,7 @@
                   <span class="tag-agent ${agentClass(m.toAgent)}">${escapeHtml(m.toAgent)}</span>
                   ${m.replyToId ? '<span style="font-size: 0.72rem; color: #64748b; font-weight: normal;">(答复引用)</span>' : ''}
                 </span>
-                <span class="msg-time">${new Date(m.createdAt).toLocaleTimeString()}</span>
+                <span class="msg-time">${formatDateTime(m.createdAt)}</span>
               </div>
               <div class="msg-body">${escapeHtml(m.content)}</div>
               <div style="margin-top: 6px; font-size: 0.72rem; color: var(--muted); display: flex; gap: 8px;">
@@ -904,7 +905,7 @@
             <div class="approval-text">
               <strong>⚠️ 待人工审批动作 [${appr.requestedBy.toUpperCase()}]：</strong>
               <span>${escapeHtml(appr.action)}</span><br>
-              <small>${escapeHtml(appr.description)} · 到期: ${new Date(appr.expiresAt).toLocaleTimeString()}</small>
+              <small>${escapeHtml(appr.description)} · 到期: ${formatDateTime(appr.expiresAt)}</small>
             </div>
             <div style="display: flex; gap: 10px;">
               <button class="btn btn-success btn-sm" onclick="decideApproval('${appr.id}', 'approved')">批准执行</button>
@@ -974,10 +975,13 @@
       return `任务 ${String(id).slice(-6)}`;
     }
 
-    function clockOf(value) {
-      if (!value) return "";
+    // Keep the browser's local timezone, but include the date for records from different days.
+    function formatDateTime(value) {
+      if (value === null || value === undefined || value === "") return "—";
       const d = new Date(value);
-      return Number.isNaN(d.getTime()) ? "" : d.toLocaleTimeString();
+      if (Number.isNaN(d.getTime())) return "—";
+      const pad = (n) => String(n).padStart(2, "0");
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
     }
 
     function clipText(text, max = 60) {
@@ -999,7 +1003,7 @@
             detail: `${taskLabel(p.taskId || ev.taskId)}：${stateLabel(p.from)} → ${stateLabel(p.to)}` };
         case "task_leased":
           return { icon: "⚡", title: "任务领取", tone: "info",
-            detail: `${workerLabel(p.workerId)} 领取 ${taskLabel(p.taskId || ev.taskId)}，租约至 ${clockOf(p.expiresAt)}` };
+            detail: `${workerLabel(p.workerId)} 领取 ${taskLabel(p.taskId || ev.taskId)}，租约至 ${formatDateTime(p.expiresAt)}` };
         case "task_lease_reaped":
           return { icon: "⏱", title: "租约超时", tone: p.requeued ? "warn" : "error",
             detail: `${taskLabel(p.taskId || ev.taskId)} ${p.requeued ? "已重新排队等待重试" : `已熔断：${clipText(p.reason, 50)}`}` };
@@ -1041,7 +1045,7 @@
       row.className = `log-row tone-${s.tone}`;
       row.title = JSON.stringify(ev); // 悬停可查看原始 JSON，便于排查
       row.innerHTML =
-        `<span class="log-time">[${new Date(ev.createdAt).toLocaleTimeString()}]</span>` +
+        `<span class="log-time">[${formatDateTime(ev.createdAt)}]</span>` +
         `<span class="log-icon">${s.icon}</span>` +
         `<span class="log-title">${escapeHtml(s.title)}</span>` +
         `<span class="log-detail">${escapeHtml(s.detail)}</span>`;
@@ -1214,7 +1218,7 @@
               <div style="font-size:0.85rem;font-weight:600;">${escapeHtml(t.label)}</div>
               <div style="font-size:0.72rem;color:var(--muted);word-break:break-all;">
                 ${t.agentId ? "Agent: " + escapeHtml(t.agentId) : "个人令牌"} ·
-                ${t.revoked ? "已吊销" : "有效"}${t.lastUsedAt ? " · 最近使用 " + new Date(t.lastUsedAt).toLocaleString() : ""}
+                ${t.revoked ? "已吊销" : "有效"}${t.lastUsedAt ? " · 最近使用 " + formatDateTime(t.lastUsedAt) : ""}
               </div>
             </div>
             ${t.revoked ? "" : `<button class="btn btn-danger btn-sm" onclick="revokeToken('${t.id}')">吊销</button>`}
