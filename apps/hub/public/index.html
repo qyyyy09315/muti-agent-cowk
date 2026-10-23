@@ -169,7 +169,14 @@
     .task-table th { white-space: nowrap; }
     .task-table td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .task-table td.task-title { white-space: normal; }
-    .agent-table td.timestamp-cell, .task-table td.timestamp-cell { white-space: normal; }
+    .agent-table td.timestamp-cell,
+    .task-table td.timestamp-cell {
+      white-space: normal;
+      overflow: visible;
+      text-overflow: unset;
+      line-height: 1.35;
+      font-variant-numeric: tabular-nums;
+    }
     .task-table td.task-title strong { font-weight: 600; font-size: 13px; }
     .task-table td.task-meta-cell { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
 
@@ -215,9 +222,14 @@
       padding: 12px 14px;
       font-family: var(--mono); font-size: 12px; line-height: 1.7;
     }
-    .log-row { display: flex; gap: 8px; padding: 3px 0; border-bottom: 1px dashed #eef2f7; }
+    .log-row { display: flex; align-items: flex-start; gap: 8px; padding: 3px 0; border-bottom: 1px dashed #eef2f7; }
     .log-row:last-child { border-bottom: none; }
-    .log-time { color: var(--faint); white-space: nowrap; }
+    .log-time {
+      color: var(--faint);
+      flex: none;
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+    }
     .log-icon { width: 1.1em; text-align: center; flex: none; }
     .log-title { font-weight: 700; white-space: nowrap; }
     .log-detail { color: var(--muted); overflow-wrap: anywhere; }
@@ -390,7 +402,7 @@
           <col style="width: 110px;">
           <col style="width: 100px;">
           <col style="width: 76px;">
-          <col style="width: 92px;">
+          <col style="width: 140px;">
           <col style="width: 150px;">
         </colgroup>
         <thead>
@@ -975,7 +987,7 @@
       return `任务 ${String(id).slice(-6)}`;
     }
 
-    // Keep the browser's local timezone, but include the date for records from different days.
+    // 使用浏览器本地时区并带上日期，避免跨日记录看起来像“今天”。
     function formatDateTime(value) {
       if (value === null || value === undefined || value === "") return "—";
       const d = new Date(value);
